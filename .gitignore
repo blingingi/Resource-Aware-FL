@@ -1,0 +1,19 @@
+# 忽略数据集文件夹 (极其重要)
+data/
+../data/
+
+# 忽略 Python 缓存文件
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 忽略实验保存的结果和模型权重
+save/
+*.npy
+*.pth
+*.pt
+*.png
+
+# 忽略 IDE 配置文件
+.idea/
+.vscode/
