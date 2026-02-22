@@ -21,58 +21,11 @@ from models.Nets import MLP, CNNMnist, CNNCifar
 from models.Fed import FedAvg
 from models.test import test_img
 from utils.resource import ResourceManager
+from utils.diversity import calculate_diversity, calculate_similarity_score
 
 # ===================================================================
 # 辅助函数：计算 KL 散度 (Diversity Metric)
 # ===================================================================
-def calculate_diversity(dataset, dict_users, num_classes):
-    diversity_scores = []
-    P_uniform = np.ones(num_classes) / num_classes 
-    
-    print("正在计算所有客户端的数据多样性 (Diversity)...")
-    
-    for idx in range(len(dict_users)):
-        user_indices = dict_users[idx]
-        if hasattr(dataset, 'targets'):
-            labels = np.array(dataset.targets)[list(user_indices)]
-        else:
-            labels = dataset.train_labels.numpy()[list(user_indices)]
-            
-        label_counts = np.zeros(num_classes)
-        for label in labels:
-            label_counts[label] += 1
-        
-        P_client = (label_counts + 1e-5) / (sum(label_counts) + 1e-5 * num_classes)
-        kl_div = np.sum(P_uniform * np.log(P_uniform / P_client))
-        diversity_scores.append(kl_div)
-        
-    return np.array(diversity_scores)
-
-# ===================================================================
-# 辅助函数：计算相似性 (Similarity Metric)
-# 只计算最后一层 (fc2) 的参数距离，防止距离过大导致分数归零
-# ===================================================================
-def calculate_similarity_score(w_global, w_local, k1=10, k2=0.01):
-    diff_sum = 0
-    target_layer = 'fc2' 
-    
-    layer_found = False
-    for k in w_global.keys():
-        if target_layer in k:
-            diff_sum += torch.sum(torch.abs(w_global[k] - w_local[k])).item()
-            layer_found = True
-            
-    if not layer_found:
-        total_diff = 0
-        total_params = 0
-        for k in w_global.keys():
-            total_diff += torch.sum(torch.abs(w_global[k] - w_local[k])).item()
-            total_params += w_global[k].numel()
-        diff_sum = total_diff
-    
-    rho = diff_sum
-    sim = k1 * np.exp(-k2 * rho)
-    return sim
 
 if __name__ == '__main__':
     args = args_parser()
@@ -155,14 +108,13 @@ if __name__ == '__main__':
             
         m = max(int(args.frac * args.num_users), 1)
 
-       # ================= [Selection Strategy (OURS v4 - Probabilistic ROI)] =================
+      # ================= [Selection Strategy (OURS v6 - 强化防偏科 + 唤醒式陈旧度补偿)] =================
         sim_min, sim_max = sim_scores.min(), sim_scores.max()
         sim_norm = (sim_scores - sim_min) / (sim_max - sim_min + 1e-8)
         
-        # 1. 自适应动态权重分配
-        progress = iter / args.epochs
-        alpha_div_dynamic = np.exp(-3.0 * progress) 
-        alpha_sim_dynamic = 1.0 - alpha_div_dynamic 
+        # 1. 彻底抛弃坑人的动态衰减！在 alpha=0.1 下，永远保持对数据全面性(Diversity)的极度渴望！
+        alpha_div_dynamic = 0.8  
+        alpha_sim_dynamic = 0.2
         data_utility_scores = alpha_sim_dynamic * sim_norm + alpha_div_dynamic * (1 - div_norm)
         
         if not hasattr(resource_mgr, 'wait_times'):
@@ -174,10 +126,18 @@ if __name__ == '__main__':
         
         for i in range(args.num_users):
             t, e = resource_mgr.calculate_cost(i, len(dict_users[i]))
+            
             # 只有单个节点达标，才有资格进入候选池
             if t <= args.max_time and e <= args.max_energy:
                 valid_candidates.append(i)
-                wait_bonus = 1.0 + 0.1 * resource_mgr.wait_times[i]
+                
+                # 【OURS v6 核心修正：唤醒式陈旧度补偿】
+                # 只有坐冷板凳超过 10 轮的优质慢节点，才爆发补偿；否则正常凭 ROI 竞争
+                if resource_mgr.wait_times[i] > 10:
+                    wait_bonus = np.exp(0.2 * (resource_mgr.wait_times[i] - 10))
+                else:
+                    wait_bonus = 1.0
+                
                 # 计算综合性价比得分
                 roi = (data_utility_scores[i] / (e + 1e-5)) * wait_bonus
                 roi_scores.append(roi)
@@ -189,7 +149,7 @@ if __name__ == '__main__':
             valid_candidates = [np.argmin(times)]
             roi_scores = [1.0]
 
-        # 3. 【核心修正】：概率轮盘赌，恢复联邦学习的随机性！
+        # 3. 概率轮盘赌，恢复联邦学习的随机性！
         roi_scores = np.array(roi_scores)
         p_values = roi_scores / np.sum(roi_scores)
         p_values = p_values.astype('float64')

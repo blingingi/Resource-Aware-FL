@@ -21,58 +21,7 @@ from models.Nets import MLP, CNNMnist, CNNCifar
 from models.Fed import FedAvg
 from models.test import test_img
 from utils.resource import ResourceManager
-
-# ===================================================================
-# 辅助函数：计算 KL 散度 (Diversity Metric)
-# ===================================================================
-def calculate_diversity(dataset, dict_users, num_classes):
-    diversity_scores = []
-    P_uniform = np.ones(num_classes) / num_classes 
-    
-    print("正在计算所有客户端的数据多样性 (Diversity)...")
-    
-    for idx in range(len(dict_users)):
-        user_indices = dict_users[idx]
-        if hasattr(dataset, 'targets'):
-            labels = np.array(dataset.targets)[list(user_indices)]
-        else:
-            labels = dataset.train_labels.numpy()[list(user_indices)]
-            
-        label_counts = np.zeros(num_classes)
-        for label in labels:
-            label_counts[label] += 1
-        
-        P_client = (label_counts + 1e-5) / (sum(label_counts) + 1e-5 * num_classes)
-        kl_div = np.sum(P_uniform * np.log(P_uniform / P_client))
-        diversity_scores.append(kl_div)
-        
-    return np.array(diversity_scores)
-
-# ===================================================================
-# 辅助函数：计算相似性 (Similarity Metric)
-# 只计算最后一层 (fc2) 的参数距离，防止距离过大导致分数归零
-# ===================================================================
-def calculate_similarity_score(w_global, w_local, k1=10, k2=0.01):
-    diff_sum = 0
-    target_layer = 'fc2' 
-    
-    layer_found = False
-    for k in w_global.keys():
-        if target_layer in k:
-            diff_sum += torch.sum(torch.abs(w_global[k] - w_local[k])).item()
-            layer_found = True
-            
-    if not layer_found:
-        total_diff = 0
-        total_params = 0
-        for k in w_global.keys():
-            total_diff += torch.sum(torch.abs(w_global[k] - w_local[k])).item()
-            total_params += w_global[k].numel()
-        diff_sum = total_diff
-    
-    rho = diff_sum
-    sim = k1 * np.exp(-k2 * rho)
-    return sim
+from utils.diversity import calculate_diversity, calculate_similarity_score
 
 if __name__ == '__main__':
     args = args_parser()
@@ -125,19 +74,8 @@ if __name__ == '__main__':
     net_glob.train()
     w_glob = net_glob.state_dict()
 
-    # ================= [策略修正] =================
-    # 1. Diversity
-    div_scores = calculate_diversity(dataset_train, dict_users, args.num_classes)
-    div_min, div_max = div_scores.min(), div_scores.max()
-    div_norm = (div_scores - div_min) / (div_max - div_min + 1e-8)
-    
-    # 2. Similarity
-    sim_scores = np.ones(args.num_users) * 10.0 # 初始给个高分
-    
-    # 3. 权重参数
-    alpha_1 = 0.2  # Similarity 权重
-    alpha_2 = 0.8  # Diversity 权重
-    # ============================================
+   # ================= [战前准备：只保留资源管理器，删掉所有数据打分] =================
+    w_glob = net_glob.state_dict()
     resource_mgr = ResourceManager(args.num_users)
     loss_train = []
     acc_test_history = [] 
@@ -148,15 +86,15 @@ if __name__ == '__main__':
 
     for iter in range(args.epochs):
         loss_locals = []
-        len_locals = [] # 【修复1】初始化当前轮次的数据量记录列表
+        len_locals = [] 
         
         if not args.all_clients:
             w_locals = []
             
         m = max(int(args.frac * args.num_users), 1)
 
-      # ================= [Selection Strategy (Random + Resource Constraints)] =================
-        # 1. 彻底放弃数据价值打分，直接纯随机打乱所有客户端
+        # ================= [Selection Strategy (Random + Resource Constraints)] =================
+        # 1. 纯随机打乱所有客户端
         all_clients = list(range(args.num_users))
         np.random.shuffle(all_clients)
         
@@ -182,7 +120,7 @@ if __name__ == '__main__':
             if len(selected_users) >= m:
                 break
                 
-        # 3. 学术兜底机制：防止参数设得太严导致本轮无人可用
+        # 3. 学术兜底机制
         if len(selected_users) == 0:
             print("⚠️ 警告：本轮系统资源约束过于严苛，触发兜底！强行选择 1 个最高效节点。")
             times = [resource_mgr.calculate_cost(i, len(dict_users[i]))[0] for i in range(args.num_users)]
@@ -190,20 +128,15 @@ if __name__ == '__main__':
             selected_users = [fastest_client]
             current_max_time, current_energy_sum = resource_mgr.calculate_cost(fastest_client, len(dict_users[fastest_client]))
             
-        # 记录被选中的节点
         resource_mgr.update_selection(selected_users)
         
         print(f"Round {iter} | 随机约束装箱 | 选中 {len(selected_users)} 人 | 时延: {current_max_time:.2f}s | 耗能: {current_energy_sum:.2f}J")
-        # ========================================================
-        # ========================================================================
+        # ========================================================================================
 
-        # 【修复完成】只保留一个循环，且严格遍历 selected_users
+        # 【核心修正】：纯粹的本地训练，没有任何 Sim 更新！
         for idx in selected_users:
             local = LocalUpdate(args=args, dataset=dataset_train, idxs=dict_users[idx])
             w, loss = local.train(net=copy.deepcopy(net_glob).to(args.device))
-            
-            new_sim = calculate_similarity_score(w_glob, w)
-            sim_scores[idx] = new_sim
             
             if args.all_clients:
                 w_locals[idx] = copy.deepcopy(w)
@@ -211,12 +144,12 @@ if __name__ == '__main__':
                 w_locals.append(copy.deepcopy(w))
             loss_locals.append(copy.deepcopy(loss))
             
-            # 严格记录被选客户端的真实样本数
             len_locals.append(len(dict_users[idx]))
             
         # 将权重传递给加权聚合函数
         w_glob = FedAvg(w_locals, len_locals)
         net_glob.load_state_dict(w_glob)
+
 
         loss_avg = sum(loss_locals) / len(loss_locals)
         loss_train.append(loss_avg)
