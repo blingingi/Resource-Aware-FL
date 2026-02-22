@@ -13,7 +13,7 @@ from torchvision import datasets, transforms
 from torch import nn
 
 # 引入项目依赖
-from utils.sampling import mnist_iid, mnist_noniid, cifar_iid, cifar_noniid, cifar_dirichlet
+from utils.sampling import mnist_iid, mnist_noniid, mnist_dirichlet,cifar_iid, cifar_noniid, cifar_dirichlet
 from utils.options import args_parser
 from models.Update import LocalUpdate
 # 确保 Nets 里的 CNNCifar 已经是你修改过的 3层宽体版本

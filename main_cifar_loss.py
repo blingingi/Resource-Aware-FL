@@ -10,7 +10,7 @@ import numpy as np
 from torchvision import datasets, transforms
 import torch
 
-from utils.sampling import mnist_iid, mnist_noniid, cifar_iid,cifar_noniid, cifar_dirichlet
+from utils.sampling import mnist_iid, mnist_noniid,mnist_dirichlet, cifar_iid,cifar_noniid, cifar_dirichlet
 from utils.options import args_parser
 from models.Update import LocalUpdate
 from models.Nets import MLP, CNNMnist, CNNCifar

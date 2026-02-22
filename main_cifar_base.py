@@ -12,7 +12,7 @@ import torch
 import os
 
 # 引入 cifar_noniid
-from utils.sampling import mnist_iid, mnist_noniid, cifar_iid, cifar_noniid, cifar_dirichlet
+from utils.sampling import mnist_iid, mnist_noniid, mnist_dirichlet, cifar_iid, cifar_noniid, cifar_dirichlet
 from utils.options import args_parser
 from models.Update import LocalUpdate
 from models.Nets import MLP, CNNMnist, CNNCifar
@@ -29,11 +29,23 @@ if __name__ == '__main__':
         trans_mnist = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))])
         dataset_train = datasets.MNIST('../data/mnist/', train=True, download=True, transform=trans_mnist)
         dataset_test = datasets.MNIST('../data/mnist/', train=False, download=True, transform=trans_mnist)
-        if args.iid:
+        # ================= [MNIST 数据划分逻辑] =================
+        if args.partition == 'iid':
+            print("=> 正在使用 IID 均匀划分 MNIST 数据...")
             dict_users = mnist_iid(dataset_train, args.num_users)
-        else:
+            
+        elif args.partition == 'shard':
+            print("=> 正在使用 Shard 分片划分 MNIST 数据 (每个客户端 2 种标签)...")
+            # 调用你 sampling.py 中的 mnist_noniid 函数
             dict_users = mnist_noniid(dataset_train, args.num_users)
             
+        elif args.partition == 'dirichlet':
+            print(f"=> 正在使用 Dirichlet 划分 MNIST 数据, alpha={args.alpha}...")
+            dict_users = mnist_dirichlet(dataset_train, args.num_users, args.alpha)
+            
+        else:
+            # 严密的错误拦截
+            exit('Error: unrecognized partition strategy for MNIST. Please choose from [iid, shard, dirichlet]')
     elif args.dataset == 'cifar':
         trans_cifar = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
         dataset_train = datasets.CIFAR10('../data/cifar', train=True, download=True, transform=trans_cifar)

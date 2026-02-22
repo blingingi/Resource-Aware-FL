@@ -13,7 +13,7 @@ from torchvision import datasets, transforms
 from torch import nn
 
 # 引入项目依赖
-from utils.sampling import mnist_iid, mnist_noniid, cifar_iid, cifar_noniid, cifar_dirichlet
+from utils.sampling import mnist_iid, mnist_noniid, mnist_dirichlet,cifar_iid, cifar_noniid, cifar_dirichlet
 from utils.options import args_parser
 from models.Update import LocalUpdate
 # 确保 Nets 里的 CNNCifar 已经是你修改过的 3层宽体版本
@@ -236,8 +236,16 @@ if __name__ == '__main__':
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     script_name = os.path.basename(__file__).split('.')[0]
     
-    file_id = 'fed_{}_{}_{}_alpha{}_ep{}_{}'.format(
-        script_name, args.dataset, args.partition, args.alpha, args.epochs, timestamp)
+    file_id = 'fed_{}_{}_{}_alpha{}_ep{}_time{}_energy{}_{}'.format(
+        script_name, 
+        args.dataset, 
+        args.partition, 
+        args.alpha, 
+        args.epochs, 
+        args.max_time,   # 记录时间红线
+        args.max_energy, # 记录能耗红线
+        timestamp
+    )
 
     # 【修复5】增加防崩溃目录检查
     save_dir = './save'
