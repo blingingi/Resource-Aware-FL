@@ -109,6 +109,9 @@ def mnist_dirichlet(dataset, num_users, alpha):
                 class_indices = np.where(labels == random_class)[0]
                 extra_idx = np.random.choice(class_indices, min_require_size, replace=False)
                 idx_batch[j] = extra_idx.tolist()
+    for j in range(num_users):
+        np.random.shuffle(idx_batch[j])
+        dict_users[j] = np.array(idx_batch[j], dtype='int64')
     return dict_users
 
 def cifar_iid(dataset, num_users):
@@ -212,7 +215,9 @@ def cifar_dirichlet(dataset, num_users, alpha):
                 class_indices = np.where(labels == random_class)[0]
                 extra_idx = np.random.choice(class_indices, min_require_size, replace=False)
                 idx_batch[j] = extra_idx.tolist()
-        
+    for j in range(num_users):
+        np.random.shuffle(idx_batch[j])
+        dict_users[j] = np.array(idx_batch[j], dtype='int64')
     return dict_users
 
 
