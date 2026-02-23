@@ -47,10 +47,16 @@ class CNNMnist(nn.Module):
 class CNNCifar(nn.Module):
     def __init__(self, args):
         super(CNNCifar, self).__init__()
-        # 回归最基础的 3 层卷积结构，剥离所有归一化层
+        # 使用 3 层卷积结构，并严格配套 Group Normalization
         self.conv1 = nn.Conv2d(3, 32, 3, padding=1)
+        # num_groups 设为 8，要求通道数必须能被 8 整除
+        self.gn1 = nn.GroupNorm(8, 32) 
+        
         self.conv2 = nn.Conv2d(32, 64, 3, padding=1)
+        self.gn2 = nn.GroupNorm(8, 64)
+        
         self.conv3 = nn.Conv2d(64, 64, 3, padding=1)
+        self.gn3 = nn.GroupNorm(8, 64)
         
         self.pool = nn.MaxPool2d(2, 2)
         
@@ -59,10 +65,10 @@ class CNNCifar(nn.Module):
         self.fc2 = nn.Linear(64, args.num_classes)
 
     def forward(self, x):
-        # 移除 gn 层，仅保留 卷积 -> 激活 -> 池化 的标准计算图
-        x = self.pool(F.relu(self.conv1(x)))
-        x = self.pool(F.relu(self.conv2(x)))
-        x = self.pool(F.relu(self.conv3(x)))
+        # 标准计算图：卷积 -> GroupNorm -> 激活 -> 池化
+        x = self.pool(F.relu(self.gn1(self.conv1(x))))
+        x = self.pool(F.relu(self.gn2(self.conv2(x))))
+        x = self.pool(F.relu(self.gn3(self.conv3(x))))
         
         # 展平特征图以送入全连接层
         x = x.view(-1, 64 * 4 * 4)

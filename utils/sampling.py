@@ -53,7 +53,7 @@ def mnist_dirichlet(dataset, num_users, alpha):
     包含防死锁机制与最小样本量保底策略
     """
     K = 10 # MNIST 有 10 个类别
-    min_require_size = 10 # 保证每个客户端至少有 10 张图（一个 batch），防止 PyTorch 训练崩溃
+    min_require_size = 32 # 保证每个客户端至少有 10 张图（一个 batch），防止 PyTorch 训练崩溃
     
     # 兼容不同版本的 PyTorch MNIST 标签命名
     if hasattr(dataset, 'targets'):
@@ -154,7 +154,7 @@ def cifar_dirichlet(dataset, num_users, alpha):
     Sample non-I.I.D client data from CIFAR10 dataset using Dirichlet distribution
     """
     K = 10 # CIFAR-10 有 10 个类别
-    min_require_size = 10 # 保证每个客户端至少有 10 张图（一个 batch），防止 PyTorch 训练崩溃
+    min_require_size = 32 # 保证每个客户端至少有 10 张图（一个 batch），防止 PyTorch 训练崩溃
     
     if hasattr(dataset, 'targets'):
         labels = np.array(dataset.targets)
