@@ -108,20 +108,14 @@ if __name__ == '__main__':
             
         m = max(int(args.frac * args.num_users), 1)
 
-      # ================= [Selection Strategy (OURS v7 - 分阶段权重 + 补偿封顶)] =================
+     # ================= [Selection Strategy (OURS v8 - 锁死多样性 + 线性温和补偿)] =================
         sim_min, sim_max = sim_scores.min(), sim_scores.max()
         sim_norm = (sim_scores - sim_min) / (sim_max - sim_min + 1e-8)
         
-        # 1. 【核心修正】：分阶段权重控制！
-        if iter < 75:
-            # 跑马圈地期：极度看重多样性，快速拉升天花板
-            alpha_div_dynamic = 0.8  
-            alpha_sim_dynamic = 0.2
-        else:
-            # 求稳保收期：后期模型已成熟，必须降低多样性权重，提高相似度权重来防止砸盘
-            alpha_div_dynamic = 0.3
-            alpha_sim_dynamic = 0.7
-            
+        # 1. 【核心修正 1：锁死权重！】
+        # 经历了 v7 的血泪教训，我们彻底明白：在 alpha=0.1 下，永远不能放松对多样性的渴望。
+        alpha_div_dynamic = 0.8  
+        alpha_sim_dynamic = 0.2
         data_utility_scores = alpha_sim_dynamic * sim_norm + alpha_div_dynamic * (1 - div_norm)
         
         if not hasattr(resource_mgr, 'wait_times'):
@@ -134,17 +128,20 @@ if __name__ == '__main__':
         for i in range(args.num_users):
             t, e = resource_mgr.calculate_cost(i, len(dict_users[i]))
             
+            # 只有单个节点达标，才有资格进入候选池
             if t <= args.max_time and e <= args.max_energy:
                 valid_candidates.append(i)
                 
-                # 【核心修正】：降低唤醒斜率，并强行加入封顶机制 (上限为 3.0 倍)
-                # 绝不能让冷板凳节点的补偿分数无限膨胀！
+                # 【核心修正 2：线性温和补偿 + 绝对封顶】
+                # 抛弃危险的 np.exp，改用线性增长！每多等 1 轮，ROI 权重只增加 0.1。
+                # 并且设置绝对上限为 2.5 倍，绝不允许劣质节点通过无限“熬工龄”来砸盘！
                 if resource_mgr.wait_times[i] > 10:
-                    raw_bonus = np.exp(0.12 * (resource_mgr.wait_times[i] - 10))
-                    wait_bonus = min(raw_bonus, 3.0) 
+                    raw_bonus = 1.0 + 0.1 * (resource_mgr.wait_times[i] - 10)
+                    wait_bonus = min(raw_bonus, 2.5) 
                 else:
                     wait_bonus = 1.0
                 
+                # 计算综合性价比得分
                 roi = (data_utility_scores[i] / (e + 1e-5)) * wait_bonus
                 roi_scores.append(roi)
                 
@@ -155,7 +152,7 @@ if __name__ == '__main__':
             valid_candidates = [np.argmin(times)]
             roi_scores = [1.0]
 
-        # 3. 概率轮盘赌
+        # 3. 概率轮盘赌，维持联邦学习的随机泛化能力
         roi_scores = np.array(roi_scores)
         p_values = roi_scores / np.sum(roi_scores)
         p_values = p_values.astype('float64')
@@ -185,7 +182,7 @@ if __name__ == '__main__':
         print(f"Round {iter} | 选中 {len(selected_users)} 人 | "
               f"Div: {alpha_div_dynamic:.2f}, Sim: {alpha_sim_dynamic:.2f} | "
               f"时延: {current_max_time:.2f}s | 耗能: {current_energy_sum:.2f}J")
-
+       
         # ========================================================================
 
         # 【修复完成】只保留一个循环，且严格遍历 selected_users
