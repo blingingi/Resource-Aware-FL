@@ -92,17 +92,23 @@ def mnist_dirichlet(dataset, num_users, alpha):
         min_size = min([len(idx_j) for idx_j in idx_batch])
         iters += 1
 
-    # 【兜底策略】对于 alpha=0.1 的极端情况，绝大多数客户端注定分不到数据
-    # 为防止后续 PyTorch 出现 ValueError 崩溃，强行给不足 10 张图的贫困节点补发随机数据
+   # 【修复后的兜底策略：保护 Non-IID 纯度】
     for j in range(num_users):
-        if len(idx_batch[j]) < min_require_size:
-            extra_idx = np.random.choice(N, min_require_size, replace=False)
-            idx_batch[j] = idx_batch[j] + extra_idx.tolist()
-
-    for j in range(num_users):
-        np.random.shuffle(idx_batch[j])
-        dict_users[j] = np.array(idx_batch[j], dtype='int64')
-        
+        current_len = len(idx_batch[j])
+        if current_len < min_require_size:
+            if current_len > 0:
+                # 方案 A: 客户端有少量数据，我们按它现有的分布进行放回重复采样，凑够 32 张
+                # 这样完全保留了它的 Non-IID 特性
+                need_size = min_require_size - current_len
+                extra_idx = np.random.choice(idx_batch[j], need_size, replace=True)
+                idx_batch[j] = idx_batch[j] + extra_idx.tolist()
+            else:
+                # 方案 B: 极端情况，客户端一张图都没分到（0 张）。
+                # 为了保持 Non-IID，我们随机给它分配 1 个主导类别，然后只从这个类别里抽 32 张图
+                random_class = np.random.randint(0, K)
+                class_indices = np.where(labels == random_class)[0]
+                extra_idx = np.random.choice(class_indices, min_require_size, replace=False)
+                idx_batch[j] = extra_idx.tolist()
     return dict_users
 
 def cifar_iid(dataset, num_users):
@@ -189,16 +195,23 @@ def cifar_dirichlet(dataset, num_users, alpha):
         min_size = min([len(idx_j) for idx_j in idx_batch])
         iters += 1
 
-    # 【兜底策略】对于 alpha=0.01 的极端情况，绝大多数客户端注定分不到数据
-    # 为防止后续 PyTorch 出现 ZeroDivisionError 崩溃，强行给不足 10 张图的贫困节点补发随机数据
+    # 【修复后的兜底策略：保护 Non-IID 纯度】
     for j in range(num_users):
-        if len(idx_batch[j]) < min_require_size:
-            extra_idx = np.random.choice(N, min_require_size, replace=False)
-            idx_batch[j] = idx_batch[j] + extra_idx.tolist()
-
-    for j in range(num_users):
-        np.random.shuffle(idx_batch[j])
-        dict_users[j] = np.array(idx_batch[j])
+        current_len = len(idx_batch[j])
+        if current_len < min_require_size:
+            if current_len > 0:
+                # 方案 A: 客户端有少量数据，我们按它现有的分布进行放回重复采样，凑够 32 张
+                # 这样完全保留了它的 Non-IID 特性
+                need_size = min_require_size - current_len
+                extra_idx = np.random.choice(idx_batch[j], need_size, replace=True)
+                idx_batch[j] = idx_batch[j] + extra_idx.tolist()
+            else:
+                # 方案 B: 极端情况，客户端一张图都没分到（0 张）。
+                # 为了保持 Non-IID，我们随机给它分配 1 个主导类别，然后只从这个类别里抽 32 张图
+                random_class = np.random.randint(0, K)
+                class_indices = np.where(labels == random_class)[0]
+                extra_idx = np.random.choice(class_indices, min_require_size, replace=False)
+                idx_batch[j] = extra_idx.tolist()
         
     return dict_users
 
