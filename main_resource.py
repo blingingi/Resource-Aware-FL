@@ -21,7 +21,7 @@ from models.Nets import MLP, CNNMnist, CNNCifar
 from models.Fed import FedAvg
 from models.test import test_img
 from utils.resource import ResourceManager
-from utils.diversity import calculate_diversity, calculate_similarity_score
+from utils.sim_div import calculate_diversity, calculate_similarity_score
 
 if __name__ == '__main__':
     args = args_parser()

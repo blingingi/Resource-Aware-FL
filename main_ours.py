@@ -21,7 +21,7 @@ from models.Nets import MLP, CNNMnist, CNNCifar
 from models.Fed import FedAvg
 from models.test import test_img
 from utils.resource import ResourceManager
-from utils.diversity import calculate_diversity, calculate_similarity_score
+from utils.sim_div import calculate_diversity, calculate_similarity_score
 
 # ===================================================================
 # 辅助函数：计算 KL 散度 (Diversity Metric)
@@ -108,13 +108,20 @@ if __name__ == '__main__':
             
         m = max(int(args.frac * args.num_users), 1)
 
-      # ================= [Selection Strategy (OURS v6 - 强化防偏科 + 唤醒式陈旧度补偿)] =================
+      # ================= [Selection Strategy (OURS v7 - 分阶段权重 + 补偿封顶)] =================
         sim_min, sim_max = sim_scores.min(), sim_scores.max()
         sim_norm = (sim_scores - sim_min) / (sim_max - sim_min + 1e-8)
         
-        # 1. 彻底抛弃坑人的动态衰减！在 alpha=0.1 下，永远保持对数据全面性(Diversity)的极度渴望！
-        alpha_div_dynamic = 0.8  
-        alpha_sim_dynamic = 0.2
+        # 1. 【核心修正】：分阶段权重控制！
+        if iter < 75:
+            # 跑马圈地期：极度看重多样性，快速拉升天花板
+            alpha_div_dynamic = 0.8  
+            alpha_sim_dynamic = 0.2
+        else:
+            # 求稳保收期：后期模型已成熟，必须降低多样性权重，提高相似度权重来防止砸盘
+            alpha_div_dynamic = 0.3
+            alpha_sim_dynamic = 0.7
+            
         data_utility_scores = alpha_sim_dynamic * sim_norm + alpha_div_dynamic * (1 - div_norm)
         
         if not hasattr(resource_mgr, 'wait_times'):
@@ -127,18 +134,17 @@ if __name__ == '__main__':
         for i in range(args.num_users):
             t, e = resource_mgr.calculate_cost(i, len(dict_users[i]))
             
-            # 只有单个节点达标，才有资格进入候选池
             if t <= args.max_time and e <= args.max_energy:
                 valid_candidates.append(i)
                 
-                # 【OURS v6 核心修正：唤醒式陈旧度补偿】
-                # 只有坐冷板凳超过 10 轮的优质慢节点，才爆发补偿；否则正常凭 ROI 竞争
+                # 【核心修正】：降低唤醒斜率，并强行加入封顶机制 (上限为 3.0 倍)
+                # 绝不能让冷板凳节点的补偿分数无限膨胀！
                 if resource_mgr.wait_times[i] > 10:
-                    wait_bonus = np.exp(0.2 * (resource_mgr.wait_times[i] - 10))
+                    raw_bonus = np.exp(0.12 * (resource_mgr.wait_times[i] - 10))
+                    wait_bonus = min(raw_bonus, 3.0) 
                 else:
                     wait_bonus = 1.0
                 
-                # 计算综合性价比得分
                 roi = (data_utility_scores[i] / (e + 1e-5)) * wait_bonus
                 roi_scores.append(roi)
                 
@@ -149,14 +155,13 @@ if __name__ == '__main__':
             valid_candidates = [np.argmin(times)]
             roi_scores = [1.0]
 
-        # 3. 概率轮盘赌，恢复联邦学习的随机性！
+        # 3. 概率轮盘赌
         roi_scores = np.array(roi_scores)
         p_values = roi_scores / np.sum(roi_scores)
         p_values = p_values.astype('float64')
-        p_values = p_values / np.sum(p_values) # 强制规避浮点精度问题
+        p_values = p_values / np.sum(p_values) 
         
         num_to_select = min(m, len(valid_candidates))
-        # 根据 ROI 概率进行加权随机抽样，取代死板的贪心排序
         priority_queue = np.random.choice(valid_candidates, num_to_select, replace=False, p=p_values)
         
         # 4. 最终的能耗装箱检查
@@ -178,8 +183,9 @@ if __name__ == '__main__':
             
         resource_mgr.update_selection(selected_users)
         print(f"Round {iter} | 选中 {len(selected_users)} 人 | "
-              f"Div权重: {alpha_div_dynamic:.2f}, Sim权重: {alpha_sim_dynamic:.2f} | "
+              f"Div: {alpha_div_dynamic:.2f}, Sim: {alpha_sim_dynamic:.2f} | "
               f"时延: {current_max_time:.2f}s | 耗能: {current_energy_sum:.2f}J")
+
         # ========================================================================
 
         # 【修复完成】只保留一个循环，且严格遍历 selected_users
