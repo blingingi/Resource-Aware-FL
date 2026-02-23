@@ -47,9 +47,30 @@ if __name__ == '__main__':
             # 严密的错误拦截
             exit('Error: unrecognized partition strategy for MNIST. Please choose from [iid, shard, dirichlet]')
     elif args.dataset == 'cifar':
-        trans_cifar = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
-        dataset_train = datasets.CIFAR10('../data/cifar', train=True, download=True, transform=trans_cifar)
-        dataset_test = datasets.CIFAR10('../data/cifar', train=False, download=True, transform=trans_cifar)
+        trans_train = transforms.Compose([
+        transforms.RandomCrop(32, padding=4),     # 随机裁剪（标准CIFAR增强）
+        transforms.RandomHorizontalFlip(),        # 随机水平翻转
+        transforms.ToTensor(),
+        transforms.Normalize((0.5, 0.5, 0.5), 
+                             (0.5, 0.5, 0.5))
+        ])
+        trans_test = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.5, 0.5, 0.5), 
+                             (0.5, 0.5, 0.5))
+        ])
+        dataset_train = datasets.CIFAR10(
+        '../data/cifar', 
+        train=True, 
+        download=True, 
+        transform=trans_train
+        )
+        dataset_test = datasets.CIFAR10(
+        '../data/cifar', 
+        train=False, 
+        download=True, 
+        transform=trans_test
+        )
         
         if args.partition=='iid':
             print("=> 正在使用 IID 均匀划分数据...")
