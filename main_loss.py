@@ -49,7 +49,7 @@ if __name__ == '__main__':
         elif args.partition == 'shard':
             dict_users = cifar_noniid(dataset_train, args.num_users)
         elif args.partition == 'dirichlet':
-            dict_users = cifar_dirichlet(dataset_train, args.num_users, args.alpha)
+            dict_users = cifar_dirichlet(dataset_train, args.num_users, args.alpha,args.local_bs)
         else:
             exit('Error: unrecognized partition strategy')
     else:

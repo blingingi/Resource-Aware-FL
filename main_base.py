@@ -80,7 +80,7 @@ if __name__ == '__main__':
             dict_users = cifar_noniid(dataset_train, args.num_users)
         elif args.partition == 'dirichlet':
             print(f"=> 正在使用 Dirichlet 划分数据, alpha={args.alpha}...")
-            dict_users = cifar_dirichlet(dataset_train, args.num_users, args.alpha)
+            dict_users = cifar_dirichlet(dataset_train, args.num_users, args.alpha,args.local_bs)
         else:
             exit('Error: unrecognized partition strategy')
     else:

@@ -48,7 +48,7 @@ if __name__ == '__main__':
                 from utils.sampling import mnist_dirichlet
                 dict_users = mnist_dirichlet(dataset_train, args.num_users, args.alpha)
             except ImportError:
-                dict_users = cifar_dirichlet(dataset_train, args.num_users, args.alpha)
+                dict_users = cifar_dirichlet(dataset_train, args.num_users, args.alpha,args.local_bs)
         else:
             exit('Error: unrecognized partition strategy for MNIST')
             
@@ -83,7 +83,7 @@ if __name__ == '__main__':
         elif args.partition == 'shard':
             dict_users = cifar_noniid(dataset_train, args.num_users)
         elif args.partition == 'dirichlet':
-            dict_users = cifar_dirichlet(dataset_train, args.num_users, args.alpha)
+            dict_users = cifar_dirichlet(dataset_train, args.num_users, args.alpha,args.local_bs)
         else:
             exit('Error: unrecognized partition strategy for CIFAR')
     else:
@@ -129,81 +129,86 @@ if __name__ == '__main__':
             
         m = max(int(args.frac * args.num_users), 1)
 
-     # ================= [Selection Strategy (OURS v8 - 锁死多样性 + 线性温和补偿)] =================
+     # ================= [Selection Strategy (OURS - 贪心背包调度算法)] =================
         sim_min, sim_max = sim_scores.min(), sim_scores.max()
         sim_norm = (sim_scores - sim_min) / (sim_max - sim_min + 1e-8)
         
-        # 1. 【核心修正 1：锁死权重！】
-        # 经历了 v7 的血泪教训，我们彻底明白：在 alpha=0.1 下，永远不能放松对多样性的渴望。
-        alpha_div_dynamic = 0.8  
-        alpha_sim_dynamic = 0.2
+        # 使用稳健的权重比例：多样性 0.5，相似性 0.5 (防止极端分布拉崩模型)
+        alpha_div_dynamic = 0.5  
+        alpha_sim_dynamic = 0.5
         data_utility_scores = alpha_sim_dynamic * sim_norm + alpha_div_dynamic * (1 - div_norm)
         
         if not hasattr(resource_mgr, 'wait_times'):
             resource_mgr.wait_times = np.zeros(args.num_users)
             
-        # 2. 资源红线初筛与 ROI 概率化
+        # 1. 时延硬约束初筛：只保留能够在 max_time 内完成的客户端
         valid_candidates = []
-        roi_scores = []
+        roi_scores_dict = {}
         
         for i in range(args.num_users):
             t, e = resource_mgr.calculate_cost(i, len(dict_users[i]))
             
-            # 只有单个节点达标，才有资格进入候选池
-            if t <= args.max_time and e <= args.max_energy:
+            if t <= args.max_time:
                 valid_candidates.append(i)
                 
-                # 【核心修正 2：线性温和补偿 + 绝对封顶】
-                # 抛弃危险的 np.exp，改用线性增长！每多等 1 轮，ROI 权重只增加 0.1。
-                # 并且设置绝对上限为 2.5 倍，绝不允许劣质节点通过无限“熬工龄”来砸盘！
+                # 线性温和补偿（防饿死机制），绝对封顶 2.5 倍
                 if resource_mgr.wait_times[i] > 10:
                     raw_bonus = 1.0 + 0.1 * (resource_mgr.wait_times[i] - 10)
                     wait_bonus = min(raw_bonus, 2.5) 
                 else:
                     wait_bonus = 1.0
                 
-                # 计算综合性价比得分
+                # 计算终极性价比 (ROI): (价值 / 耗能) * 等待补偿
                 roi = (data_utility_scores[i] / (e + 1e-5)) * wait_bonus
-                roi_scores.append(roi)
-                
-        # 兜底机制
+                roi_scores_dict[i] = roi
+
+        # 兜底机制：如果时延卡得太死，导致全军覆没
         if len(valid_candidates) == 0:
-            print("⚠️ 约束过严，触发兜底！")
+            print("⚠️ 时延约束过严，触发兜底！寻找最快完成的客户端。")
             times = [resource_mgr.calculate_cost(i, len(dict_users[i]))[0] for i in range(args.num_users)]
             valid_candidates = [np.argmin(times)]
-            roi_scores = [1.0]
+            roi_scores_dict[valid_candidates[0]] = 1.0
 
-        # 3. 概率轮盘赌，维持联邦学习的随机泛化能力
-        roi_scores = np.array(roi_scores)
-        p_values = roi_scores / np.sum(roi_scores)
-        p_values = p_values.astype('float64')
-        p_values = p_values / np.sum(p_values) 
+        # 2. 贪心排序：按性价比 (ROI) 从高到低降序排列
+        valid_candidates.sort(key=lambda x: roi_scores_dict[x], reverse=True)
         
-        num_to_select = min(m, len(valid_candidates))
-        priority_queue = np.random.choice(valid_candidates, num_to_select, replace=False, p=p_values)
-        
-        # 4. 最终的能耗装箱检查
+        # 3. 能耗约束背包：从最高性价比开始装箱，直到人数满或能耗耗尽
         selected_users = []
         current_energy_sum = 0.0
         current_max_time = 0.0
         
-        for client_id in priority_queue:
-            t, e = resource_mgr.calculate_cost(client_id, len(dict_users[client_id]))
+        for client_id in valid_candidates:
+            if len(selected_users) >= m:
+                break # 已经选满了 m 个人
+                
+            _, e = resource_mgr.calculate_cost(client_id, len(dict_users[client_id]))
+            
+            # 检查能耗预算
             if current_energy_sum + e <= args.max_energy:
                 selected_users.append(client_id)
                 current_energy_sum += e
-                current_max_time = max(current_max_time, t)
                 
-        # 5. 更新陈旧度
+        # 兜底机制：如果全员高能耗，导致连一个人都装不下
+        if len(selected_users) == 0:
+             print("⚠️ 能耗预算极其严苛，触发兜底！寻找能耗最小的达标客户端。")
+             best_fallback = min(valid_candidates, key=lambda x: resource_mgr.calculate_cost(x, len(dict_users[x]))[1])
+             selected_users.append(best_fallback)
+             current_energy_sum += resource_mgr.calculate_cost(best_fallback, len(dict_users[best_fallback]))[1]
+
+        # 计算本轮真实最大时延
+        current_max_time = max([resource_mgr.calculate_cost(i, len(dict_users[i]))[0] for i in selected_users])
+
+        # 4. 更新等待陈旧度
         resource_mgr.wait_times += 1 
         for su in selected_users:
             resource_mgr.wait_times[su] = 0 
             
         resource_mgr.update_selection(selected_users)
+        
         print(f"Round {iter} | 选中 {len(selected_users)} 人 | "
               f"Div: {alpha_div_dynamic:.2f}, Sim: {alpha_sim_dynamic:.2f} | "
               f"时延: {current_max_time:.2f}s | 耗能: {current_energy_sum:.2f}J")
-       
+        
         # ========================================================================
 
         # 【修复完成】只保留一个循环，且严格遍历 selected_users

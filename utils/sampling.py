@@ -47,15 +47,14 @@ def mnist_noniid(dataset, num_users):
             dict_users[i] = np.concatenate((dict_users[i], idxs[rand*num_imgs:(rand+1)*num_imgs]), axis=0)
     return dict_users
 
-def mnist_dirichlet(dataset, num_users, alpha):
+def mnist_dirichlet(dataset, num_users, alpha, min_require_size):
     """
     Sample non-I.I.D client data from MNIST dataset using Dirichlet distribution
-    包含防死锁机制与最小样本量保底策略
+    支持通过 min_require_size (通常传入 args.local_bs) 动态控制最小样本量
     """
     K = 10 # MNIST 有 10 个类别
-    min_require_size = 32 # 保证每个客户端至少有 10 张图（一个 batch），防止 PyTorch 训练崩溃
     
-    # 兼容不同版本的 PyTorch MNIST 标签命名
+    # 1. 兼容不同版本的 PyTorch MNIST 标签命名
     if hasattr(dataset, 'targets'):
         labels = np.array(dataset.targets)
     elif hasattr(dataset, 'train_labels'):
@@ -65,25 +64,33 @@ def mnist_dirichlet(dataset, num_users, alpha):
         
     N = len(labels)
     dict_users = {i: np.array([], dtype='int64') for i in range(num_users)}
-
     idx_batch = [[] for _ in range(num_users)]
     
-    # 【修复核心】增加最大尝试次数 (max_iters)，强行打破死循环死锁
+    # 预先提取每个类别的索引池，提高 while 循环效率
+    idx_k_list = [np.where(labels == k)[0] for k in range(K)]
+
+    # 【已删除硬编码】现在 min_require_size 完全由函数参数决定
+    
     max_iters = 10 
     iters = 0
     min_size = 0
     
+    # 2. 分配主循环
     while min_size < min_require_size and iters < max_iters:
         idx_batch = [[] for _ in range(num_users)]
         for k in range(K):
-            idx_k = np.where(labels == k)[0]
+            idx_k = idx_k_list[k].copy()
             np.random.shuffle(idx_k)
             
             # 根据 alpha 生成分布比例
             proportions = np.random.dirichlet(np.repeat(alpha, num_users))
-            # 限制每个客户端的数据量不能过多，保持整体平衡
-            proportions = np.array([p * (len(idx_j) < N / num_users) for p, idx_j in zip(proportions, idx_batch)])
-            proportions = proportions / proportions.sum()
+            
+            # 平衡性修正：防止单个客户端分到过多数据
+            # 增加 np.sum(eff_probs) > 0 判断，防止 alpha 极小时全为 0 导致除以 0 崩溃
+            eff_probs = np.array([p * (len(idx_j) < N / num_users) for p, idx_j in zip(proportions, idx_batch)])
+            if eff_probs.sum() > 0:
+                proportions = eff_probs / eff_probs.sum()
+            
             proportions = (np.cumsum(proportions) * len(idx_k)).astype(int)[:-1]
             
             # 分配数据索引
@@ -92,28 +99,28 @@ def mnist_dirichlet(dataset, num_users, alpha):
         min_size = min([len(idx_j) for idx_j in idx_batch])
         iters += 1
 
-   # 【修复后的兜底策略：保护 Non-IID 纯度】
+    # 3. 【无损兜底策略】确保每个客户端至少有 min_require_size 个样本
     for j in range(num_users):
         current_len = len(idx_batch[j])
         if current_len < min_require_size:
             if current_len > 0:
-                # 方案 A: 客户端有少量数据，我们按它现有的分布进行放回重复采样，凑够 32 张
-                # 这样完全保留了它的 Non-IID 特性
+                # 方案 A: 客户端有少量数据，按现有分布放回重复采样
                 need_size = min_require_size - current_len
                 extra_idx = np.random.choice(idx_batch[j], need_size, replace=True)
-                idx_batch[j] = idx_batch[j] + extra_idx.tolist()
+                idx_batch[j].extend(extra_idx.tolist())
             else:
-                # 方案 B: 极端情况，客户端一张图都没分到（0 张）。
-                # 为了保持 Non-IID，我们随机给它分配 1 个主导类别，然后只从这个类别里抽 32 张图
+                # 方案 B: 极端空节点，随机分配一个主导类别并采样补齐
                 random_class = np.random.randint(0, K)
-                class_indices = np.where(labels == random_class)[0]
+                class_indices = idx_k_list[random_class]
                 extra_idx = np.random.choice(class_indices, min_require_size, replace=False)
                 idx_batch[j] = extra_idx.tolist()
+                
+    # 4. 打乱并输出结果
     for j in range(num_users):
         np.random.shuffle(idx_batch[j])
         dict_users[j] = np.array(idx_batch[j], dtype='int64')
+        
     return dict_users
-
 def cifar_iid(dataset, num_users):
     """
     Sample I.I.D. client data from CIFAR10 dataset
@@ -158,69 +165,77 @@ def cifar_noniid(dataset, num_users):
 
 
 
-def cifar_dirichlet(dataset, num_users, alpha):
+def cifar_dirichlet(dataset, num_users, alpha, min_require_size):
     """
-    Sample non-I.I.D client data from CIFAR10 dataset using Dirichlet distribution
+    使用 Dirichlet 分布分配数据，支持动态最小样本量 (min_require_size)
     """
-    K = 10 # CIFAR-10 有 10 个类别
-    min_require_size = 32 # 保证每个客户端至少有 10 张图（一个 batch），防止 PyTorch 训练崩溃
+    K = 10 
     
+    # 1. 兼容性获取标签
     if hasattr(dataset, 'targets'):
         labels = np.array(dataset.targets)
-    else:
+    elif hasattr(dataset, 'train_labels'):
         labels = np.array(dataset.train_labels)
+    else:
+        labels = np.array([dataset[i][1] for i in range(len(dataset))])
         
     N = len(labels)
     dict_users = {i: np.array([], dtype='int64') for i in range(num_users)}
-
     idx_batch = [[] for _ in range(num_users)]
     
-    # 【修复核心】增加最大尝试次数 (max_iters)，强行打破死循环死锁
+    # 2. 预先获取每个类别的索引池
+    idx_k_list = [np.where(labels == k)[0] for k in range(K)]
+    
+    # 【修复】删除函数内部硬编码的 min_require_size = 32，直接使用传入参数
+    
     max_iters = 10 
     iters = 0
     min_size = 0
     
+    # 3. 分配循环
     while min_size < min_require_size and iters < max_iters:
         idx_batch = [[] for _ in range(num_users)]
         for k in range(K):
-            idx_k = np.where(labels == k)[0]
+            idx_k = idx_k_list[k].copy()
             np.random.shuffle(idx_k)
-            # 根据 alpha 生成分布比例
-            proportions = np.random.dirichlet(np.repeat(alpha, num_users))
-            # 限制每个客户端的数据量不能过多，保持整体平衡
-            proportions = np.array([p * (len(idx_j) < N / num_users) for p, idx_j in zip(proportions, idx_batch)])
-            proportions = proportions / proportions.sum()
-            proportions = (np.cumsum(proportions) * len(idx_k)).astype(int)[:-1]
             
-            # 分配数据索引
-            idx_batch = [idx_j + idx.tolist() for idx_j, idx in zip(idx_batch, np.split(idx_k, proportions))]
+            # 生成分布比例
+            proportions = np.random.dirichlet(np.repeat(alpha, num_users))
+            
+            # 这里的平衡逻辑在极低 alpha 下可能失效，做了安全处理
+            effective_probs = np.array([p * (len(idx_j) < N / num_users) for p, idx_j in zip(proportions, idx_batch)])
+            if effective_probs.sum() > 0:
+                proportions = effective_probs / effective_probs.sum()
+            
+            proportions = (np.cumsum(proportions) * len(idx_k)).astype(int)[:-1]
+            split_idxs = np.split(idx_k, proportions)
+            idx_batch = [idx_j + idx.tolist() for idx_j, idx in zip(idx_batch, split_idxs)]
             
         min_size = min([len(idx_j) for idx_j in idx_batch])
         iters += 1
 
-    # 【修复后的兜底策略：保护 Non-IID 纯度】
+    # 4. 【核心兜底策略】确保每个客户端拥有至少一个完整的 Batch 量
     for j in range(num_users):
         current_len = len(idx_batch[j])
         if current_len < min_require_size:
             if current_len > 0:
-                # 方案 A: 客户端有少量数据，我们按它现有的分布进行放回重复采样，凑够 32 张
-                # 这样完全保留了它的 Non-IID 特性
+                # 方案 A: 放回重复采样（保持该客户端已有的 Non-IID 分布）
                 need_size = min_require_size - current_len
                 extra_idx = np.random.choice(idx_batch[j], need_size, replace=True)
-                idx_batch[j] = idx_batch[j] + extra_idx.tolist()
+                idx_batch[j].extend(extra_idx.tolist())
             else:
-                # 方案 B: 极端情况，客户端一张图都没分到（0 张）。
-                # 为了保持 Non-IID，我们随机给它分配 1 个主导类别，然后只从这个类别里抽 32 张图
+                # 方案 B: 极端空节点补齐（随机选一个类别进行采样）
                 random_class = np.random.randint(0, K)
-                class_indices = np.where(labels == random_class)[0]
+                class_indices = idx_k_list[random_class]
                 extra_idx = np.random.choice(class_indices, min_require_size, replace=False)
                 idx_batch[j] = extra_idx.tolist()
+
+    # 5. 打乱并输出
     for j in range(num_users):
         np.random.shuffle(idx_batch[j])
         dict_users[j] = np.array(idx_batch[j], dtype='int64')
+        
     return dict_users
-
-
 
 
 
