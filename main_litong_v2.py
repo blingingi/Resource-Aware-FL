@@ -79,7 +79,7 @@ if __name__ == '__main__':
         elif args.partition == 'shard':
             dict_users = cifar_noniid(dataset_train, args.num_users)
         elif args.partition == 'dirichlet':
-            dict_users = cifar_dirichlet(dataset_train, args.num_users, args.alpha)
+            dict_users = cifar_dirichlet(dataset_train, args.num_users, args.alpha,args.local_bs)
         else:
             exit('Error: unrecognized partition strategy for CIFAR')
     else:
@@ -102,11 +102,11 @@ if __name__ == '__main__':
     div_norm = (div_scores - div_min) / (div_max - div_min + 1e-8)
     
     # 2. Similarity
-    sim_scores = np.ones(args.num_users) * 10.0 # 初始给个高分
+    sim_scores = np.zeros(args.num_users) # 初始化为 0，让第一轮完全由 Diversity 主导
     
     # 3. 权重参数
-    alpha_1 = 0.2  # Similarity 权重
-    alpha_2 = 0.8  # Diversity 权重
+    alpha_1 = 0.5  # Similarity 权重
+    alpha_2 = 0.5 # Diversity 权重
     # ============================================
 
     loss_train = []
