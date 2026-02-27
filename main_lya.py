@@ -1,3 +1,7 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+# Python version: 3.6
+
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -5,7 +9,9 @@ import copy
 import numpy as np
 from torchvision import datasets, transforms
 import torch
+import torch.nn.functional as F
 import os
+import datetime
 
 # 引入 cifar_noniid
 from utils.sampling import mnist_iid, mnist_noniid, mnist_dirichlet, cifar_iid, cifar_noniid, cifar_dirichlet
@@ -15,10 +21,9 @@ from models.Nets import MLP, CNNMnist, CNNCifar
 from models.Fed import FedAvg
 from models.test import test_img
 
-# 导入你的资源管理器
+# 导入你的资源管理器和计算工具
 from utils.resource import ResourceManager
 from utils.sim_div import get_weight_difference, compute_cosine_similarity
-
 
 if __name__ == '__main__':
     # parse args
@@ -30,48 +35,31 @@ if __name__ == '__main__':
         trans_mnist = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))])
         dataset_train = datasets.MNIST('../data/mnist/', train=True, download=True, transform=trans_mnist)
         dataset_test = datasets.MNIST('../data/mnist/', train=False, download=True, transform=trans_mnist)
-        # ================= [MNIST 数据划分逻辑] =================
         if args.partition == 'iid':
             print("=> 正在使用 IID 均匀划分 MNIST 数据...")
             dict_users = mnist_iid(dataset_train, args.num_users)
-            
         elif args.partition == 'shard':
-            print("=> 正在使用 Shard 分片划分 MNIST 数据 (每个客户端 2 种标签)...")
-            # 调用你 sampling.py 中的 mnist_noniid 函数
+            print("=> 正在使用 Shard 分片划分 MNIST 数据...")
             dict_users = mnist_noniid(dataset_train, args.num_users)
-            
         elif args.partition == 'dirichlet':
             print(f"=> 正在使用 Dirichlet 划分 MNIST 数据, alpha={args.alpha}...")
             dict_users = mnist_dirichlet(dataset_train, args.num_users, args.alpha)
-            
         else:
-            # 严密的错误拦截
-            exit('Error: unrecognized partition strategy for MNIST. Please choose from [iid, shard, dirichlet]')
+            exit('Error: unrecognized partition strategy')
+            
     elif args.dataset == 'cifar':
         trans_train = transforms.Compose([
-        transforms.RandomCrop(32, padding=4),     # 随机裁剪（标准CIFAR增强）
-        transforms.RandomHorizontalFlip(),        # 随机水平翻转
-        transforms.ToTensor(),
-        transforms.Normalize((0.5, 0.5, 0.5), 
-                             (0.5, 0.5, 0.5))
+            transforms.RandomCrop(32, padding=4),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
         ])
         trans_test = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.5, 0.5, 0.5), 
-                             (0.5, 0.5, 0.5))
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
         ])
-        dataset_train = datasets.CIFAR10(
-        '../data/cifar', 
-        train=True, 
-        download=True, 
-        transform=trans_train
-        )
-        dataset_test = datasets.CIFAR10(
-        '../data/cifar', 
-        train=False, 
-        download=True, 
-        transform=trans_test
-        )
+        dataset_train = datasets.CIFAR10('../data/cifar', train=True, download=True, transform=trans_train)
+        dataset_test = datasets.CIFAR10('../data/cifar', train=False, download=True, transform=trans_test)
         
         if args.partition=='iid':
             print("=> 正在使用 IID 均匀划分数据...")
@@ -81,11 +69,12 @@ if __name__ == '__main__':
             dict_users = cifar_noniid(dataset_train, args.num_users)
         elif args.partition == 'dirichlet':
             print(f"=> 正在使用 Dirichlet 划分数据, alpha={args.alpha}...")
-            dict_users = cifar_dirichlet(dataset_train, args.num_users, args.alpha,args.local_bs)
+            dict_users = cifar_dirichlet(dataset_train, args.num_users, args.alpha, args.local_bs)
         else:
             exit('Error: unrecognized partition strategy')
     else:
         exit('Error: unrecognized dataset')
+
     img_size = dataset_train[0][0].shape
 
     # build model
@@ -100,6 +89,7 @@ if __name__ == '__main__':
         net_glob = MLP(dim_in=len_in, dim_hidden=200, dim_out=args.num_classes).to(args.device)
     else:
         exit('Error: unrecognized model')
+        
     print(net_glob)
     net_glob.train()
 
@@ -110,20 +100,13 @@ if __name__ == '__main__':
     loss_train = []
     acc_test_history = [] 
 
-    # === [新增] 初始化资源管理器与李雅普诺夫队列 ===
-    resource_mgr = ResourceManager(args.num_users)
+    # === [核心重构] 初始化资源管理器与李雅普诺夫队列 ===
+    # 必须传入 dict_users，资源管理器才能根据真实数据量静态计算所有节点的开销
+    resource_mgr = ResourceManager(args.num_users, dict_users, limit_ratio=0.8)
     
-    # 虚拟队列，记录100个客户端的资源超支情况 (初始为0)
-    Q_energy = np.zeros(args.num_users)
-    Q_time = np.zeros(args.num_users)
-    
-    # 【核心超参数：资源红线与 Lyapunov V 值】
-    # E_limit 和 T_limit 是系统允许的“每轮平均最高消耗”。
-    # 你需要根据打印出的实际开销来调整这两个值，使得 High/Mid 轻松达标，Low 容易超标。
-    E_limit = 2.0  
-    T_limit = 1.0  
-    
-    V = 5.0  # 权衡参数：越大越看重模型准确率，越小越看重资源限制
+    # 权衡参数 V：越大越看重模型准确率 (SIM/DIV)，越小越看重资源限制。
+    # 建议值：5.0~50.0 视具体分数数量级而定
+    V = 5.0  
 
     # === 初始化全局更新方向参考 ===
     flat_w_glob = get_weight_difference(w_glob, w_glob) 
@@ -143,16 +126,10 @@ if __name__ == '__main__':
         candidate_w_locals = {}
         candidate_losses = {}
         candidate_lens = {}
-        candidate_costs = {} # [新增] 记录候选节点的资源开销
 
         print(f"\n--- Round {iter} ---")
         
         for idx in candidate_idxs:
-            # 获取数据量，提前计算该节点的时延和能耗
-            data_size = len(dict_users[idx])
-            t_cost, e_cost = resource_mgr.calculate_cost(idx, data_size)
-            candidate_costs[idx] = {'time': t_cost, 'energy': e_cost}
-
             local = LocalUpdate(args=args, dataset=dataset_train, idxs=dict_users[idx])
             w, loss = local.train(net=copy.deepcopy(net_glob).to(args.device))
             
@@ -163,7 +140,7 @@ if __name__ == '__main__':
             candidate_w_locals[idx] = cpu_w
             
             candidate_losses[idx] = loss
-            candidate_lens[idx] = data_size
+            candidate_lens[idx] = len(dict_users[idx])
             
             torch.cuda.empty_cache()
 
@@ -184,7 +161,7 @@ if __name__ == '__main__':
                 best_idx = -1
                 
                 for idx in remaining_candidates:
-                    # (1) 准确率收益项
+                    # (1) 准确率收益项 (Utility)
                     utility = alpha * sim_scores[idx]
                     div_penalty = 0.0
                     if len(selected_idxs) > 0:
@@ -194,10 +171,8 @@ if __name__ == '__main__':
                             )
                     utility -= beta * div_penalty
                     
-                    # (2) 资源惩罚项 (排队越长，开销越大，惩罚越重)
-                    e_cost = candidate_costs[idx]['energy']
-                    t_cost = candidate_costs[idx]['time']
-                    resource_penalty = Q_energy[idx] * e_cost + Q_time[idx] * t_cost
+                    # (2) 资源惩罚项 (直接从管理器获取 Q * Cost)
+                    resource_penalty = resource_mgr.get_penalty(idx)
                     
                     # (3) 结合 V 值的最终得分
                     final_score = V * utility - resource_penalty
@@ -211,22 +186,9 @@ if __name__ == '__main__':
                 
         print(f"Selected clients: {selected_idxs}")
         
-        # === [新增] 李雅普诺夫队列的演进 (Queue Evolution) ===
-        # 无论是否在候选池中，所有 100 个客户端的队列都要更新
-        for i in range(args.num_users):
-            if i in selected_idxs:
-                # 选中的节点：排队长度 = 原长度 + 本轮消耗 - 平均限额
-                e_cost = candidate_costs[i]['energy']
-                t_cost = candidate_costs[i]['time']
-                Q_energy[i] = max(0.0, Q_energy[i] + e_cost - E_limit)
-                Q_time[i]   = max(0.0, Q_time[i] + t_cost - T_limit)
-            else:
-                # 没选中的节点：趁机休息，排队长度缩减
-                Q_energy[i] = max(0.0, Q_energy[i] - E_limit)
-                Q_time[i]   = max(0.0, Q_time[i] - T_limit)
-                
-        # 记录公平性 (可选)
-        resource_mgr.update_selection(selected_idxs)
+        # === [核心重构] 李雅普诺夫队列演进 ===
+        # 仅需一行代码，内部自动处理所有 100 个客户端的队列惩罚与恢复
+        avg_q_t, avg_q_e = resource_mgr.update_queues_and_counts(selected_idxs)
 
         # 4. 提取被选中节点的数据并聚合
         w_locals = [candidate_w_locals[idx] for idx in selected_idxs]
@@ -249,8 +211,23 @@ if __name__ == '__main__':
         acc_test_history.append(acc_test)
         
         # 打印当前轮次的平均队列长度，用于监控系统资源状态
-        avg_q_e = np.mean(Q_energy)
-        avg_q_t = np.mean(Q_time)
-        print('Round {:3d}, Loss {:.3f}, Acc {:.2f}%, Avg Q_E: {:.2f}, Avg Q_T: {:.2f}'.format(
+        print('Round {:3d}, Loss {:.3f}, Acc {:.2f}%, Avg Q_E: {:.3f}, Avg Q_T: {:.3f}'.format(
             iter, loss_avg, acc_test, avg_q_e, avg_q_t))
         net_glob.train()
+
+    # ================= [绘图与保存结果] =================
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    script_name = os.path.basename(__file__).split('.')[0]
+    
+    file_id = 'fed_{}_{}_{}_alpha{}_ep{}_V{}_{}'.format(
+        script_name, args.dataset, args.partition, args.alpha, args.epochs, V, timestamp)
+
+    # 增加防崩溃目录检查，确保 save 文件夹存在
+    save_dir = './save'
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+
+    save_path = os.path.join(save_dir, '{}_acc.npy'.format(file_id))
+    np.save(save_path, acc_test_history)
+    
+    print(f"🎉 实验结束！数据已绝对安全地保存到: {save_path}")

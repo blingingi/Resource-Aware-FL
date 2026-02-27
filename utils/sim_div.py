@@ -1,5 +1,7 @@
 import numpy as np
 import torch
+import torch
+import torch.nn.functional as F
 # ===================================================================
 # 辅助函数：计算 KL 散度 (Diversity Metric)
 # ===================================================================
