@@ -88,15 +88,14 @@ if __name__ == '__main__':
     div_min, div_max = div_scores.min(), div_scores.max()
     div_norm = (div_scores - div_min) / (div_max - div_min + 1e-8)
     
-    sim_scores = np.ones(args.num_users) * 10.0 # 初始给个高分
+    # 【必须改！】初始化设为 0，让第一轮完全由 Diversity 主导，坚决不给未评估的节点虚高分！
+    sim_scores = np.zeros(args.num_users)
     
     resource_mgr = ResourceManager(args.num_users)
     loss_train = []
     acc_test_history = [] 
 
-    if args.all_clients: 
-        print("Aggregation over all clients")
-        w_locals = [w_glob for i in range(args.num_users)]
+   
 
     # ================= [联邦学习主循环] =================
     for iter in range(args.epochs):
@@ -113,8 +112,8 @@ if __name__ == '__main__':
         sim_norm = (sim_scores - sim_min) / (sim_max - sim_min + 1e-8)
         
         # 使用稳健的权重比例：多样性 0.5，相似性 0.5 (在 Dir=0.1 下防止极端偏向)
-        alpha_div_dynamic = 0.5  
-        alpha_sim_dynamic = 0.5
+        alpha_div_dynamic = 0.8  
+        alpha_sim_dynamic = 0.2
         data_utility_scores = alpha_sim_dynamic * sim_norm + alpha_div_dynamic * (1 - div_norm)
         
         if not hasattr(resource_mgr, 'wait_times'):
@@ -218,8 +217,9 @@ if __name__ == '__main__':
                 w_locals.append(copy.deepcopy(w))
             loss_locals.append(copy.deepcopy(loss))
             
-            # 【极其重要】：聚合权重必须按照它“实际训练的样本数”来算！
-            len_locals.append(actual_sample_num)
+           # 【颠覆传统的创新】：为了不让高价值慢节点在聚合时被边缘化，
+            # 我们使用它【原始的数据量】来作为聚合权重！
+            len_locals.append(len(dict_users[idx]))
             
         # 将权重传递给加权聚合函数
         w_glob = FedAvg(w_locals, len_locals)
@@ -249,6 +249,8 @@ if __name__ == '__main__':
         args.epochs, 
         args.max_time,   
         args.max_energy, 
+        alpha_sim_dynamic,        # 相似度权重
+        alpha_div_dynamic,
         timestamp
     )
 
