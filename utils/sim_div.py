@@ -51,3 +51,23 @@ def calculate_similarity_score(w_global, w_local, k1=10, k2=0.01):
     rho = diff_sum
     sim = k1 * np.exp(-k2 * rho)
     return sim
+
+def get_weight_difference(w_new, w_old):
+    """计算模型权重的差值（更新量），并强制在 CPU 上计算以避免设备冲突"""
+    diff = []
+    for k in w_new.keys():
+        # 强制将新老权重都拉到 CPU 上，转为 float 后再相减
+        t_new = w_new[k].cpu().float()
+        t_old = w_old[k].cpu().float()
+        diff.append((t_new - t_old).view(-1).detach())
+    return torch.cat(diff)
+
+def compute_cosine_similarity(vec1, vec2):
+    """计算两个一维张量的余弦相似度，强制在 CPU 运算"""
+    # 强制拉到 CPU
+    vec1 = vec1.cpu()
+    vec2 = vec2.cpu()
+    
+    if vec1.norm() == 0 or vec2.norm() == 0:
+        return 0.0
+    return F.cosine_similarity(vec1.unsqueeze(0), vec2.unsqueeze(0)).item()
