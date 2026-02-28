@@ -152,7 +152,9 @@ if __name__ == '__main__':
         else:
             sim_scores = {}
             for idx in candidate_idxs:
-                sim_scores[idx] = compute_cosine_similarity(candidate_updates[idx], global_update_dir)
+                sim = compute_cosine_similarity(candidate_updates[idx], global_update_dir)
+                # 【修复】：sim 已经是 float 类型，直接赋值即可，去掉 .item()
+                sim_scores[idx] = sim if not torch.isnan(torch.tensor(sim)) else 0.0
             
             remaining_candidates = list(candidate_idxs)
             
@@ -164,17 +166,24 @@ if __name__ == '__main__':
                     # (1) 准确率收益项 (Utility)
                     utility = alpha * sim_scores[idx]
                     div_penalty = 0.0
+                    
                     if len(selected_idxs) > 0:
                         for selected_idx in selected_idxs:
-                            div_penalty += compute_cosine_similarity(
+                            sim_with_selected = compute_cosine_similarity(
                                 candidate_updates[idx], candidate_updates[selected_idx]
                             )
-                    utility -= beta * div_penalty
+                            if not torch.isnan(torch.tensor(sim_with_selected)):
+                                div_penalty += sim_with_selected
+                        
+                        # 取平均，防止惩罚爆炸
+                        div_penalty = div_penalty / len(selected_idxs)
+                        
+                    utility = utility - beta * div_penalty
                     
-                    # (2) 资源惩罚项 (直接从管理器获取 Q * Cost)
+                    # (2) 获取资源惩罚项
                     resource_penalty = resource_mgr.get_penalty(idx)
                     
-                    # (3) 结合 V 值的最终得分
+                    # (3) Lya 的核心得分公式：结合 Lyapunov 权衡参数 V
                     final_score = V * utility - resource_penalty
                     
                     if final_score > best_score:

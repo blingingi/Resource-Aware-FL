@@ -127,14 +127,12 @@ if __name__ == '__main__':
             local = LocalUpdate(args=args, dataset=dataset_train, idxs=dict_users[idx])
             w, loss = local.train(net=copy.deepcopy(net_glob).to(args.device))
             
-            if args.all_clients:
-                w_locals[idx] = copy.deepcopy(w)
-            else:
-                w_locals.append(copy.deepcopy(w))
+            w_locals.append(copy.deepcopy(w))
             loss_locals.append(copy.deepcopy(loss))
             
             # 【修复2】收集当前客户端真实的数据量
             len_locals.append(len(dict_users[idx]))
+            
             
         # 【修复3】将数据量列表传递给加权聚合函数
         w_glob = FedAvg(w_locals, len_locals)

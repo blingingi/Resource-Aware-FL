@@ -43,7 +43,7 @@ def args_parser():
     parser.add_argument('--all_clients', action='store_true', help='aggregation over all clients')
     # 时延约束 (单位: 秒)，默认设为 2.0s
     parser.add_argument('--max_time', type=float, default=500, help='maximum latency constraint per round (seconds)')
-
+    parser.add_argument('--shards_per_user', type=int, default=2, help='number of shards assigned to each client')
     # 能耗约束 (单位: 焦耳)，默认设为 50.0J
     parser.add_argument('--max_energy', type=float, default=50.0, help='maximum energy budget per round (joules)')
     # 添加 Dirichlet 分布的 alpha 参数，默认值设为 0.1
