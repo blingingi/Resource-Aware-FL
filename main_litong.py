@@ -21,7 +21,7 @@ from models.Nets import MLP, CNNMnist, CNNCifar
 from models.Fed import FedAvg  # 注意：如果你在文件里重写了 FedAvg，这行可以注释掉
 from models.test import test_img
 # 导入余弦相似度计算函数，以及权重差值计算函数
-from sim_div import get_weight_difference, compute_cosine_similarity
+from utils.sim_div import get_weight_difference, compute_cosine_similarity
 
 if __name__ == '__main__':
     # parse args
@@ -232,6 +232,9 @@ if __name__ == '__main__':
         acc_test_history.append(acc_test)
         print('Round {:3d}, Average loss {:.3f}, Test Acc {:.2f}%'.format(iter, loss_avg, acc_test))
         net_glob.train()
+        # 全局学习率衰减：每轮乘 0.99
+        # 跑到 200 轮时，学习率大约会平滑衰减到初始值的 13%，这是十分经典的设定。
+        args.lr = args.lr * 0.99
 
     # ================= [绘图与保存结果] =================
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")

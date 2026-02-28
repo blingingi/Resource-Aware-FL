@@ -214,6 +214,9 @@ if __name__ == '__main__':
         print('Round {:3d}, Loss {:.3f}, Acc {:.2f}%, Avg Q_E: {:.3f}, Avg Q_T: {:.3f}'.format(
             iter, loss_avg, acc_test, avg_q_e, avg_q_t))
         net_glob.train()
+        # 全局学习率衰减：每轮乘 0.99
+        # 跑到 200 轮时，学习率大约会平滑衰减到初始值的 13%，这是十分经典的设定。
+        args.lr = args.lr * 0.99
 
     # ================= [绘图与保存结果] =================
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
