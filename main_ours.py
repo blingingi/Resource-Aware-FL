@@ -7,50 +7,50 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import copy
 import numpy as np
-import torch
-import os
 from torchvision import datasets, transforms
-from torch import nn
+import torch
+import torch.nn.functional as F
+import os
+import datetime
 
-# 引入项目依赖
+# 引入 cifar_noniid
 from utils.sampling import mnist_iid, mnist_noniid, mnist_dirichlet, cifar_iid, cifar_noniid, cifar_dirichlet
 from utils.options import args_parser
 from models.Update import LocalUpdate
-# 确保 Nets 里的 CNNCifar 已经是你修改过的 3层宽体版本
 from models.Nets import MLP, CNNMnist, CNNCifar
 from models.Fed import FedAvg
 from models.test import test_img
+
+# 导入你的资源管理器和计算工具
 from utils.resource import ResourceManager
-from utils.sim_div import calculate_diversity, calculate_similarity_score
+from utils.sim_div import get_weight_difference, compute_cosine_similarity
 
 if __name__ == '__main__':
+    # parse args
     args = args_parser()
     args.device = torch.device('cuda:{}'.format(args.gpu) if torch.cuda.is_available() and args.gpu != -1 else 'cpu')
 
-    # ================= [Load Dataset] =================
+    # load dataset and split users
     if args.dataset == 'mnist':
         trans_mnist = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))])
         dataset_train = datasets.MNIST('../data/mnist/', train=True, download=True, transform=trans_mnist)
         dataset_test = datasets.MNIST('../data/mnist/', train=False, download=True, transform=trans_mnist)
-        
-        # 兼容不同的划分方式
         if args.partition == 'iid':
+            print("=> 正在使用 IID 均匀划分 MNIST 数据...")
             dict_users = mnist_iid(dataset_train, args.num_users)
         elif args.partition == 'shard':
+            print("=> 正在使用 Shard 分片划分 MNIST 数据...")
             dict_users = mnist_noniid(dataset_train, args.num_users)
         elif args.partition == 'dirichlet':
-            try:
-                from utils.sampling import mnist_dirichlet
-                dict_users = mnist_dirichlet(dataset_train, args.num_users, args.alpha, args.local_bs)
-            except ImportError:
-                dict_users = cifar_dirichlet(dataset_train, args.num_users, args.alpha, args.local_bs)
+            print(f"=> 正在使用 Dirichlet 划分 MNIST 数据, alpha={args.alpha}...")
+            dict_users = mnist_dirichlet(dataset_train, args.num_users, args.alpha)
         else:
-            exit('Error: unrecognized partition strategy for MNIST')
+            exit('Error: unrecognized partition strategy')
             
     elif args.dataset == 'cifar':
         trans_train = transforms.Compose([
-            transforms.RandomCrop(32, padding=4),     # 随机裁剪（标准CIFAR增强）
-            transforms.RandomHorizontalFlip(),        # 随机水平翻转
+            transforms.RandomCrop(32, padding=4),
+            transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
             transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
         ])
@@ -61,199 +61,194 @@ if __name__ == '__main__':
         dataset_train = datasets.CIFAR10('../data/cifar', train=True, download=True, transform=trans_train)
         dataset_test = datasets.CIFAR10('../data/cifar', train=False, download=True, transform=trans_test)
         
-        if args.partition == 'iid':
+        if args.partition=='iid':
+            print("=> 正在使用 IID 均匀划分数据...")
             dict_users = cifar_iid(dataset_train, args.num_users)
-        elif args.partition == 'shard':
+        elif args.partition=='shard':
+            print("=> 正在使用 Shard 分片划分数据...")
             dict_users = cifar_noniid(dataset_train, args.num_users)
         elif args.partition == 'dirichlet':
+            print(f"=> 正在使用 Dirichlet 划分数据, alpha={args.alpha}...")
             dict_users = cifar_dirichlet(dataset_train, args.num_users, args.alpha, args.local_bs)
         else:
-            exit('Error: unrecognized partition strategy for CIFAR')
+            exit('Error: unrecognized partition strategy')
     else:
         exit('Error: unrecognized dataset')
 
-    # ================= [Build Model] =================
-    if args.dataset == 'mnist':
-        net_glob = CNNMnist(args=args).to(args.device)
-    elif args.dataset == 'cifar':
+    img_size = dataset_train[0][0].shape
+
+    # build model
+    if args.model == 'cnn' and args.dataset == 'cifar':
         net_glob = CNNCifar(args=args).to(args.device)
-    
+    elif args.model == 'cnn' and args.dataset == 'mnist':
+        net_glob = CNNMnist(args=args).to(args.device)
+    elif args.model == 'mlp':
+        len_in = 1
+        for x in img_size:
+            len_in *= x
+        net_glob = MLP(dim_in=len_in, dim_hidden=200, dim_out=args.num_classes).to(args.device)
+    else:
+        exit('Error: unrecognized model')
+        
     print(net_glob)
     net_glob.train()
+
+    # copy weights
     w_glob = net_glob.state_dict()
 
-    # ================= [策略初始化] =================
-    print("正在计算所有客户端的数据多样性 (Diversity)...")
-    div_scores = calculate_diversity(dataset_train, dict_users, args.num_classes)
-    div_min, div_max = div_scores.min(), div_scores.max()
-    div_norm = (div_scores - div_min) / (div_max - div_min + 1e-8)
-    
-    # 【必须改！】初始化设为 0，让第一轮完全由 Diversity 主导，坚决不给未评估的节点虚高分！
-    sim_scores = np.zeros(args.num_users)
-    
-    resource_mgr = ResourceManager(args.num_users)
+    # training
     loss_train = []
     acc_test_history = [] 
 
-   
+    # === [核心重构] 初始化资源管理器与李雅普诺夫队列 ===
+    # 必须传入 dict_users，资源管理器才能根据真实数据量静态计算所有节点的开销
+    resource_mgr = ResourceManager(args.num_users, dict_users, limit_ratio=0.8)
+    
+    # 权衡参数 V：越大越看重模型准确率 (SIM/DIV)，越小越看重资源限制。
+    # 建议值：5.0~50.0 视具体分数数量级而定
+    V = 5.0  
 
-    # ================= [联邦学习主循环] =================
+    # === 初始化全局更新方向参考 ===
+    flat_w_glob = get_weight_difference(w_glob, w_glob) 
+    global_update_dir = torch.zeros_like(flat_w_glob).cpu()
+    
+    # === [新增] 初始化历史梯度缓存 ===
+    historical_updates = {i: torch.zeros_like(flat_w_glob).cpu() for i in range(args.num_users)}
+
+    # === [核心修正] 初始化被选次数记录器，强制探索未被选择的节点 ===
+    selection_counts = {i: 0 for i in range(args.num_users)}
+    gamma = 2.0  # 频率惩罚系数。若依然出现死磕某几个节点的情况，可调大至 5.0 或 10.0
+
+    alpha = 0.8  # SIM的权重
+    beta = 0.2   # DIV的权重
+
     for iter in range(args.epochs):
-        loss_locals = []
-        len_locals = [] 
         
-        if not args.all_clients:
-            w_locals = []
-            
         m = max(int(args.frac * args.num_users), 1)
+        pool_size = min(m * 2, args.num_users) 
+        
+        candidate_idxs = np.random.choice(range(args.num_users), pool_size, replace=False)
 
-        # ================= [Selection Strategy (OURS - 贪心背包 + 弹性降级)] =================
-        sim_min, sim_max = sim_scores.min(), sim_scores.max()
-        sim_norm = (sim_scores - sim_min) / (sim_max - sim_min + 1e-8)
+        print(f"\n--- Round {iter} ---")
         
-        # 使用稳健的权重比例：多样性 0.5，相似性 0.5 (在 Dir=0.1 下防止极端偏向)
-        alpha_div_dynamic = 0.8  
-        alpha_sim_dynamic = 0.2
-        data_utility_scores = alpha_sim_dynamic * sim_norm + alpha_div_dynamic * (1 - div_norm)
+        selected_idxs = []
         
-        if not hasattr(resource_mgr, 'wait_times'):
-            resource_mgr.wait_times = np.zeros(args.num_users)
+        if iter == 0 or global_update_dir.norm() == 0:
+            selected_idxs = np.random.choice(candidate_idxs, m, replace=False).tolist()
+        else:
+            sim_scores = {}
+            for idx in candidate_idxs:
+                sim = compute_cosine_similarity(historical_updates[idx], global_update_dir)
+                sim_scores[idx] = sim if not torch.isnan(torch.tensor(sim)) else 0.0
             
-        valid_candidates = []
-        roi_scores_dict = {}
-        client_workload_ratio = {} # 【新增】：记录每个客户端本轮被允许完成的工作量比例
-        
-        # 1. 计算弹性比例与性价比 (ROI)
-        for i in range(args.num_users):
-            t, e = resource_mgr.calculate_cost(i, len(dict_users[i]))
+            remaining_candidates = list(candidate_idxs)
             
-            # 【核心突破：弹性降级 Partial Work】
-            if t > args.max_time:
-                # 超时了？不踢人！按比例缩减工作量、耗时和能耗
-                ratio = args.max_time / t
-                t_adjusted = args.max_time
-                e_adjusted = e * ratio
-            else:
-                ratio = 1.0
-                t_adjusted = t
-                e_adjusted = e
+            for _ in range(m):
+                best_score = -float('inf')
+                best_idx = -1
                 
-            client_workload_ratio[i] = ratio
-            valid_candidates.append(i) # 所有人都能进候选池，保留所有特征！
-            
-            # 线性温和补偿（防饿死机制），绝对封顶 2.5 倍
-            if resource_mgr.wait_times[i] > 10:
-                raw_bonus = 1.0 + 0.1 * (resource_mgr.wait_times[i] - 10)
-                wait_bonus = min(raw_bonus, 2.5) 
-            else:
-                wait_bonus = 1.0
-            
-            # 计算终极性价比 (ROI)：由于训练数据打了折扣，Utility也要打折扣！
-            roi = ((data_utility_scores[i] * ratio) / (e_adjusted + 1e-5)) * wait_bonus
-            roi_scores_dict[i] = roi
-
-        # 2. 贪心排序：按性价比 (ROI) 从高到低降序排列
-        valid_candidates.sort(key=lambda x: roi_scores_dict[x], reverse=True)
-        
-        # 3. 能耗约束背包：从最高性价比开始装箱
-        selected_users = []
-        current_energy_sum = 0.0
-        current_max_time = 0.0
-        
-        for client_id in valid_candidates:
-            if len(selected_users) >= m:
-                break # 已经选满了 m 个人
+                for idx in remaining_candidates:
+                    # (1) 准确率收益项 (Utility)
+                    utility = alpha * sim_scores[idx]
+                    div_penalty = 0.0
+                    
+                    if len(selected_idxs) > 0:
+                        for selected_idx in selected_idxs:
+                            sim_with_selected = compute_cosine_similarity(
+                                historical_updates[idx], historical_updates[selected_idx]
+                            )
+                            if not torch.isnan(torch.tensor(sim_with_selected)):
+                                div_penalty += sim_with_selected
+                        
+                        div_penalty = div_penalty / len(selected_idxs)
+                    
+                    utility = utility - beta * div_penalty
+                    
+                    # (2) 获取真实的底层资源惩罚项
+                    resource_penalty = resource_mgr.get_penalty(idx)
+                    
+                    # (3) [核心修正] Lya 得分计算：加入 gamma * selection_counts[idx] 的公平性惩罚
+                    final_score = V * utility - resource_penalty - gamma * selection_counts[idx]
+                    
+                    if final_score > best_score:
+                        best_score = final_score
+                        best_idx = idx
                 
-            # 拿到打折后的真实能耗和时延
-            _, original_e = resource_mgr.calculate_cost(client_id, len(dict_users[client_id]))
-            ratio = client_workload_ratio[client_id]
-            e_adjusted = original_e * ratio
-            
-            # 检查打折后的能耗预算
-            if current_energy_sum + e_adjusted <= args.max_energy:
-                selected_users.append(client_id)
-                current_energy_sum += e_adjusted
+                selected_idxs.append(best_idx)
+                remaining_candidates.remove(best_idx)
+        
+        # === [核心修正] 选人结束后，更新被选节点的计数值 ===
+        for idx in selected_idxs:
+            selection_counts[idx] += 1
                 
-        # 兜底机制：如果能耗极度紧张，导致连一个人都装不下
-        if len(selected_users) == 0:
-             print("⚠️ 能耗预算极其严苛，触发兜底！寻找打折后能耗最小的客户端。")
-             best_fallback = min(valid_candidates, key=lambda x: resource_mgr.calculate_cost(x, len(dict_users[x]))[1] * client_workload_ratio[x])
-             selected_users.append(best_fallback)
-             current_energy_sum += resource_mgr.calculate_cost(best_fallback, len(dict_users[best_fallback]))[1] * client_workload_ratio[best_fallback]
-
-        # 统计本轮真实最大时延
-        for su in selected_users:
-            t, _ = resource_mgr.calculate_cost(su, len(dict_users[su]))
-            t_adj = t * client_workload_ratio[su] if t > args.max_time else t
-            current_max_time = max(current_max_time, t_adj)
-
-        # 4. 更新等待陈旧度
-        resource_mgr.wait_times += 1 
-        for su in selected_users:
-            resource_mgr.wait_times[su] = 0 
-            
-        resource_mgr.update_selection(selected_users)
+        print(f"Selected clients: {selected_idxs}")
         
-        print(f"Round {iter:3d} | 选中 {len(selected_users):2d} 人 | "
-              f"时延: {current_max_time:.2f}s | 耗能: {current_energy_sum:.2f}J")
+        # ==========================================================
+        # 核心重构 2: 更新李雅普诺夫资源队列 (结算阶段)
+        # ==========================================================
+        # 必须在确定选了谁之后，立刻更新队列，扣除对应资源
+        avg_q_t, avg_q_e = resource_mgr.update_queues_and_counts(selected_idxs)
+
+        # ==========================================================
+        # 核心重构 3: 仅让被选中的客户端进行训练 (消耗阶段)
+        # ==========================================================
+        w_locals = []
+        loss_locals = []
+        len_locals = []
         
-        # ================= [Local Training] =================
-        for idx in selected_users:
-            ratio = client_workload_ratio[idx]
-            # 【截断数据】：根据 ratio 决定给这个客户端真实派发多少数据
-            actual_sample_num = max(int(len(dict_users[idx]) * ratio), 1)
-            actual_idxs = dict_users[idx][:actual_sample_num] # 只取前 N 个样本
-            
-            # 这里传进去的是截断后的数据索引 actual_idxs！
-            local = LocalUpdate(args=args, dataset=dataset_train, idxs=actual_idxs)
+        for idx in selected_idxs:
+            local = LocalUpdate(args=args, dataset=dataset_train, idxs=dict_users[idx])
+            # 只有被选中的节点才真刀真枪地消耗算力和电量去 train
             w, loss = local.train(net=copy.deepcopy(net_glob).to(args.device))
             
-            new_sim = calculate_similarity_score(w_glob, w)
-            sim_scores[idx] = new_sim
+            # 训练完成后，计算最新的更新梯度
+            update_vec = get_weight_difference(w, w_glob).cpu()
             
-            if args.all_clients:
-                w_locals[idx] = copy.deepcopy(w)
-            else:
-                w_locals.append(copy.deepcopy(w))
-            loss_locals.append(copy.deepcopy(loss))
+            # === [关键步骤] 把最新梯度存入缓存，供下一轮挑选时使用 ===
+            historical_updates[idx] = update_vec
             
-           # 【颠覆传统的创新】：为了不让高价值慢节点在聚合时被边缘化，
-            # 我们使用它【原始的数据量】来作为聚合权重！
+            w_locals.append({k: v.cpu() for k, v in w.items()})
+            loss_locals.append(loss)
             len_locals.append(len(dict_users[idx]))
             
-        # 将权重传递给加权聚合函数
-        w_glob = FedAvg(w_locals, len_locals)
+            torch.cuda.empty_cache()
+
+        # ==========================================================
+        # 核心重构 4: 模型聚合与全局更新
+        # ==========================================================
+        w_glob_new = FedAvg(w_locals, len_locals)
+        
+        current_global_update = get_weight_difference(w_glob_new, w_glob)
+        global_update_dir = 0.9 * global_update_dir + 0.1 * current_global_update
+
+        w_glob = w_glob_new
         net_glob.load_state_dict(w_glob)
 
         loss_avg = sum(loss_locals) / len(loss_locals)
         loss_train.append(loss_avg)
 
-        # ================= [Evaluation] =================
-        net_glob.eval()
+        # ... (后续的测试和保存代码保持不变) ...
+
+        net_glob.eval() 
         acc_test, loss_test = test_img(net_glob, dataset_test, args)
         acc_test_history.append(acc_test)
-        print('  ==> Average loss {:.3f}, Test Acc {:.2f}%'.format(loss_avg, acc_test))
+        
+        # 打印当前轮次的平均队列长度，用于监控系统资源状态
+        print('Round {:3d}, Loss {:.3f}, Acc {:.2f}%, Avg Q_E: {:.3f}, Avg Q_T: {:.3f}'.format(
+            iter, loss_avg, acc_test, avg_q_e, avg_q_t))
         net_glob.train()
+        # 全局学习率衰减：每轮乘 0.99
+        # 跑到 200 轮时，学习率大约会平滑衰减到初始值的 13%，这是十分经典的设定。
         args.lr = args.lr * 0.99
 
     # ================= [绘图与保存结果] =================
-    import datetime
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     script_name = os.path.basename(__file__).split('.')[0]
     
-    file_id = 'fed_{}_{}_{}_alpha{}_ep{}_time{}_energy{}_{}'.format(
-        script_name, 
-        args.dataset, 
-        args.partition, 
-        args.alpha, 
-        args.epochs, 
-        args.max_time,   
-        args.max_energy, 
-        alpha_sim_dynamic,        # 相似度权重
-        alpha_div_dynamic,
-        timestamp
-    )
+    file_id = 'fed_{}_{}_{}_alpha{}_ep{}_V{}_{}'.format(
+        script_name, args.dataset, args.partition, args.alpha, args.epochs, V, timestamp)
 
+    # 增加防崩溃目录检查，确保 save 文件夹存在
     save_dir = './save'
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
@@ -262,3 +257,5 @@ if __name__ == '__main__':
     np.save(save_path, acc_test_history)
     
     print(f"🎉 实验结束！数据已绝对安全地保存到: {save_path}")
+
+

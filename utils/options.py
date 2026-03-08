@@ -48,5 +48,7 @@ def args_parser():
     parser.add_argument('--max_energy', type=float, default=50.0, help='maximum energy budget per round (joules)')
     # 添加 Dirichlet 分布的 alpha 参数，默认值设为 0.1
     parser.add_argument('--alpha', type=float, default=0.1, help='The value of alpha for Dirichlet distribution')
+    parser.add_argument('--use_litong', action='store_true', help='是否使用LiTong近端项')
+    parser.add_argument('--use_logits', action='store_true', help='是否使用Logit Adjustment数据均衡')
     args = parser.parse_args()
     return args
