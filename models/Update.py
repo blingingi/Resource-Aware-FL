@@ -29,6 +29,7 @@ class LocalUpdate(object):
         self.loss_func = nn.CrossEntropyLoss()
         self.selected_clients = []
         self.ldr_train = DataLoader(DatasetSplit(dataset, idxs), batch_size=self.args.local_bs, shuffle=True)
+        
         # === [新增代码：计算本地数据分布 pi_y] ===
         if self.args.use_logits:
             self.pi_y = torch.zeros(args.num_classes)
@@ -39,14 +40,15 @@ class LocalUpdate(object):
             if total_samples > 0:
                 self.pi_y = self.pi_y / total_samples
                 
-            # 转移到设备上备用
             self.pi_y = self.pi_y.to(self.args.device)
-            # ==========================================
+        # ==========================================
 
-    def train(self, net):
+    def train(self, net, global_net):
         net.train()
+        # 将 global_net 的参数固化，切断它的梯度图，防止内存爆炸
+        global_weight_collector = list(global_net.parameters())
+        
         optimizer = torch.optim.SGD(net.parameters(), lr=self.args.lr, momentum=self.args.momentum)
-
         epoch_loss = []
         
         for iter in range(self.args.local_ep):
@@ -55,28 +57,39 @@ class LocalUpdate(object):
                 images, labels = images.to(self.args.device), labels.to(self.args.device)
                 net.zero_grad()
                 
-                log_probs = net(images) 
+                # 1. 正常的前向传播
+                log_probs = net(images)
                 
-                # === [根据开关决定是否进行 Logits 惩罚] ===
+                # === [致命修复 2：补齐 Logit Adjustment 真实计算代码] ===
                 if self.args.use_logits:
                     tau = 1.0
                     epsilon = 1e-8
+                    # 计算惩罚项并减去
                     adjustment = tau * torch.log(self.pi_y + epsilon)
                     adjusted_logits = log_probs - adjustment
                     loss = self.loss_func(adjusted_logits, labels)
                 else:
-                    # 如果没开开关，就走最标准的交叉熵计算
+                    # 不开 Logits 时，执行标准交叉熵
                     loss = self.loss_func(log_probs, labels)
-                # ============================================
+                # ==========================================================
+                
+                # === [致命修复 1：统一变量名为 use_proximal] ===
+                if self.args.use_proximal:
+                    proximal_term = 0.0
+                    # 遍历本地模型的每一个参数矩阵 w，和全局模型的对应矩阵 w_t
+                    for w, w_t in zip(net.parameters(), global_weight_collector):
+                        # 计算 L2 距离的平方：||w - w_t||^2
+                        proximal_term += torch.sum((w - w_t) ** 2)
+                    
+                    # 将惩罚项按权重 mu/2 叠加到原损失上
+                    loss = loss + (self.args.mu / 2) * proximal_term
+                # ==========================================================
 
+                # 3. 带着被惩罚过的 Loss 进行反向传播
                 loss.backward()
                 optimizer.step()
                 
-                if self.args.verbose and batch_idx % 10 == 0:
-                    print('Update Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
-                        iter, batch_idx * len(images), len(self.ldr_train.dataset),
-                               100. * batch_idx / len(self.ldr_train), loss.item()))
                 batch_loss.append(loss.item())
             epoch_loss.append(sum(batch_loss)/len(batch_loss))
+            
         return net.state_dict(), sum(epoch_loss) / len(epoch_loss)
-

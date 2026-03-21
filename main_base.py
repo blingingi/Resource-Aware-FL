@@ -125,12 +125,17 @@ if __name__ == '__main__':
 
         for idx in idxs_users:
             local = LocalUpdate(args=args, dataset=dataset_train, idxs=dict_users[idx])
-            w, loss = local.train(net=copy.deepcopy(net_glob).to(args.device))
+            
+            # 【核心修复】必须同时传入本地网络和全局网络(作为只读标尺)
+            w, loss = local.train(
+                net=copy.deepcopy(net_glob).to(args.device),
+                global_net=copy.deepcopy(net_glob).to(args.device)
+            )
             
             w_locals.append(copy.deepcopy(w))
             loss_locals.append(copy.deepcopy(loss))
             
-            # 【修复2】收集当前客户端真实的数据量
+            # 收集当前客户端真实的数据量
             len_locals.append(len(dict_users[idx]))
             
             
