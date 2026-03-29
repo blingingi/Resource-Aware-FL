@@ -114,9 +114,8 @@ if __name__ == '__main__':
 
 
     for iter in range(args.epochs):
-        
         loss_locals = []
-        len_locals = [] # 【修复1】新建列表，严格记录被选中客户端的数据量
+        len_locals = [] 
         w_locals = []
             
         m = max(int(args.frac * args.num_users), 1)
@@ -127,20 +126,24 @@ if __name__ == '__main__':
         for idx in idxs_users:
             local = LocalUpdate(args=args, dataset=dataset_train, idxs=dict_users[idx])
             
-            # 【核心修复】必须同时传入本地网络和全局网络(作为只读标尺)
+            # 【修复4：去除冗余的 global_net 深拷贝】
+            # global_net 仅作为只读参考，直接传入 net_glob 本体即可，Update.py 中并不会修改它
             w, loss = local.train(
                 net=copy.deepcopy(net_glob).to(args.device),
-                global_net=copy.deepcopy(net_glob).to(args.device)
+                global_net=net_glob 
             )
             
-            w_locals.append(copy.deepcopy(w))
-            loss_locals.append(copy.deepcopy(loss))
-            
-            # 收集当前客户端真实的数据量
+            # 【修复2：彻底解决 VRAM 显存泄漏】
+            # 必须将权重逐个拉回 CPU，抛弃无脑的 deepcopy
+            w_locals.append({k: v.cpu() for k, v in w.items()})
+            loss_locals.append(loss)
             len_locals.append(len(dict_users[idx]))
             
+            # 显式清空当前客户端训练产生的显存碎片
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             
-        # 【修复3】将数据量列表传递给加权聚合函数
+        # 传递包含真实数据量权重的 len_locals
         w_glob = FedAvg(w_locals, len_locals)
 
         # copy weight to net_glob

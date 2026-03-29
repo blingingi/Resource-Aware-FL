@@ -1,16 +1,22 @@
 import numpy as np
 
 class ResourceManager:
-    def __init__(self, num_users, dict_users, model_size_mb=2.5, limit_ratio=0.8):
+    def __init__(self, num_users, dict_users, local_ep=5, model_size_mb=2.5, limit_ratio=0.8):
         """
-        初始化资源管理器并完美适配 Lyapunov 队列
-        :param dict_users: 全局数据划分字典，用于获取真实数据量
-        :param limit_ratio: 限制系数（如 0.8 表示要求系统平均开销只能达到理论均值的 80%
+        初始化资源管理器 (完美契合联邦学习主流物理能耗模型)
+        :param local_ep: 本地训练轮数，计算量与此成正比
         """
         self.num_users = num_users
         self.profiles = {}
         self.selection_counts = np.zeros(num_users)
         
+        # --- 物理学常数设置 (根据顶级会议的经典 MEC 参数归一化) ---
+        # cycles_per_sample: 处理单个样本所需的 CPU 周期数 (单位: 兆周期 Mcycles)
+        self.cycles_per_sample = 20.0 
+        # kappa: CPU 能量有效性系数 (底层芯片的电容特征)
+        self.kappa = 0.05
+        self.local_ep = local_ep
+
         # === 1. 初始化物理设备 ===
         device_types = ['High', 'Mid', 'Low']
         np.random.seed(42) 
@@ -18,24 +24,25 @@ class ResourceManager:
         for i in range(num_users):
             d_type = np.random.choice(device_types, p=[0.2, 0.5, 0.3])
             
+            # 使用更严谨的学术指标：CPU频率(GHz), 带宽(Mbps), 传输功率(Watt)
             if d_type == 'High':
-                compute_speed = np.random.uniform(8.0, 10.0) 
-                bandwidth = np.random.uniform(8.0, 10.0)    
-                power = np.random.uniform(4.0, 5.0)          
+                f_i = np.random.uniform(2.0, 2.5)      # CPU频率 (GHz)
+                R_i = np.random.uniform(10.0, 20.0)    # 通信带宽/传输速率 (Mbps)
+                p_i = np.random.uniform(1.0, 1.5)      # 通信发射功率 (W)
             elif d_type == 'Mid':
-                compute_speed = np.random.uniform(4.0, 6.0)
-                bandwidth = np.random.uniform(4.0, 6.0)
-                power = np.random.uniform(2.0, 3.0)
+                f_i = np.random.uniform(1.2, 1.8)
+                R_i = np.random.uniform(4.0, 8.0)
+                p_i = np.random.uniform(0.5, 0.8)
             else: # Low
-                compute_speed = np.random.uniform(1.0, 2.0)
-                bandwidth = np.random.uniform(1.0, 2.0)
-                power = np.random.uniform(0.5, 1.0)
+                f_i = np.random.uniform(0.8, 1.0)
+                R_i = np.random.uniform(1.0, 2.0)
+                p_i = np.random.uniform(0.1, 0.3)
                 
             self.profiles[i] = {
                 'type': d_type,
-                'compute': compute_speed,
-                'bandwidth': bandwidth,
-                'power': power
+                'f_i': f_i,
+                'R_i': R_i,
+                'p_i': p_i
             }
 
         # === 2. 静态预计算所有客户端的开销 ===
@@ -46,16 +53,34 @@ class ResourceManager:
             data_samples = len(dict_users[i])
             profile = self.profiles[i]
             
-            # 时延 = 计算时间 + 通信时间
-            t_comp = (data_samples * 0.01) / profile['compute']
-            t_comm = model_size_mb / profile['bandwidth']
-            self.time_costs[i] = t_comp + t_comm
+            # ---------------------------------------------------------
+            # [核心公式 1: 计算阶段 Computation]
+            # 总 CPU 周期 (Mcycles) = 样本数 * Epoch * 每个样本的周期
+            # ---------------------------------------------------------
+            total_cycles = data_samples * self.local_ep * self.cycles_per_sample
             
-            # 能耗 = 功率 * 时间
-            self.energy_costs[i] = self.time_costs[i] * profile['power']
+            # 计算时延 = 总周期 / CPU频率 (因频率单位是GHz，周期是Mcycles，需除以1000换算秒)
+            t_comp = total_cycles / (profile['f_i'] * 1000)
+            
+            # 计算能耗 = kappa * 总周期 * (CPU频率)^2
+            e_comp = self.kappa * total_cycles * (profile['f_i'] ** 2)
+
+            # ---------------------------------------------------------
+            # [核心公式 2: 通信阶段 Communication]
+            # ---------------------------------------------------------
+            # 通信时延 = 模型大小 / 传输速率
+            t_comm = model_size_mb / profile['R_i']
+            
+            # 通信能耗 = 传输功率 * 通信时延 (线性)
+            e_comm = profile['p_i'] * t_comm
+
+            # ---------------------------------------------------------
+            # 总开销汇总
+            # ---------------------------------------------------------
+            self.time_costs[i] = t_comp + t_comm
+            self.energy_costs[i] = e_comp + e_comm
 
         # === 3. 生成符合客观物理规律的 Lyapunov 红线 ===
-        # 以全体客户端的平均真实开销为基准，乘以限制比例
         self.T_limit = np.mean(self.time_costs) * limit_ratio
         self.E_limit = np.mean(self.energy_costs) * limit_ratio
         
@@ -81,7 +106,7 @@ class ResourceManager:
         """
         for i in range(self.num_users):
             if i in selected_users:
-                # 选中者：排队长度增加
+                # 选中者：排队长度增加 (积累资源债)
                 self.selection_counts[i] += 1
                 self.Q_time[i] = max(0.0, self.Q_time[i] + self.time_costs[i] - self.T_limit)
                 self.Q_energy[i] = max(0.0, self.Q_energy[i] + self.energy_costs[i] - self.E_limit)

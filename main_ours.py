@@ -103,7 +103,7 @@ if __name__ == '__main__':
 
     # === [核心重构] 初始化资源管理器与李雅普诺夫队列 ===
     # 必须传入 dict_users，资源管理器才能根据真实数据量静态计算所有节点的开销
-    resource_mgr = ResourceManager(args.num_users, dict_users, limit_ratio=0.8)
+    resource_mgr = ResourceManager(args.num_users, dict_users, local_ep=args.local_ep, limit_ratio=0.8)
     
     # 权衡参数 V：越大越看重模型准确率 (SIM/DIV)，越小越看重资源限制。
     # 建议值：5.0~50.0 视具体分数数量级而定
