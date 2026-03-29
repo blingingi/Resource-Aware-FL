@@ -40,7 +40,7 @@ def args_parser():
     parser.add_argument('--stopping_rounds', type=int, default=10, help='rounds of early stopping')
     parser.add_argument('--verbose', action='store_true', help='verbose print')
     parser.add_argument('--seed', type=int, default=1, help='random seed (default: 1)')
-    parser.add_argument('--all_clients', action='store_true', help='aggregation over all clients')
+    
     # 时延约束 (单位: 秒)，默认设为 2.0s
     parser.add_argument('--max_time', type=float, default=500, help='maximum latency constraint per round (seconds)')
     parser.add_argument('--shards_per_user', type=int, default=2, help='number of shards assigned to each client')
@@ -50,6 +50,5 @@ def args_parser():
     parser.add_argument('--alpha', type=float, default=0.1, help='The value of alpha for Dirichlet distribution')
     parser.add_argument('--use_proximal', action='store_true', help='是否使用近端正则化项')
     parser.add_argument('--mu', type=float, default=0.01, help='近端正则化项的弹簧拉力系数')
-    parser.add_argument('--use_logits', action='store_true', help='是否使用Logit Adjustment数据均衡')
     args = parser.parse_args()
     return args

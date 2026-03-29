@@ -14,15 +14,18 @@ import os
 # 引入 cifar_noniid
 from utils.sampling import mnist_iid, mnist_noniid, mnist_dirichlet, cifar_iid, cifar_noniid, cifar_dirichlet
 from utils.options import args_parser
+from utils.seed import set_seed
 from models.Update import LocalUpdate
 from models.Nets import MLP, CNNMnist, CNNCifar
 from models.Fed import FedAvg
 from models.test import test_img
 
+
 if __name__ == '__main__':
     # parse args
     args = args_parser()
     args.device = torch.device('cuda:{}'.format(args.gpu) if torch.cuda.is_available() and args.gpu != -1 else 'cpu')
+    set_seed(42)
 
     # load dataset and split users
     if args.dataset == 'mnist':
@@ -114,9 +117,7 @@ if __name__ == '__main__':
         
         loss_locals = []
         len_locals = [] # 【修复1】新建列表，严格记录被选中客户端的数据量
-        
-        if not args.all_clients:
-            w_locals = []
+        w_locals = []
             
         m = max(int(args.frac * args.num_users), 1)
         

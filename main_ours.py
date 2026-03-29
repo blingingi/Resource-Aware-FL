@@ -24,12 +24,13 @@ from models.test import test_img
 # 导入你的资源管理器和计算工具
 from utils.resource import ResourceManager
 from utils.sim_div import get_weight_difference, compute_cosine_similarity
+from utils.seed import set_seed
 
 if __name__ == '__main__':
     # parse args
     args = args_parser()
     args.device = torch.device('cuda:{}'.format(args.gpu) if torch.cuda.is_available() and args.gpu != -1 else 'cpu')
-
+    set_seed(42)
     # load dataset and split users
     if args.dataset == 'mnist':
         trans_mnist = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))])

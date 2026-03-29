@@ -16,6 +16,7 @@ import datetime
 # 导入你项目中的自定义模块
 from utils.sampling import mnist_iid, mnist_noniid, mnist_dirichlet, cifar_iid, cifar_noniid, cifar_dirichlet
 from utils.options import args_parser
+from utils.seed import set_seed
 from models.Update import LocalUpdate
 from models.Nets import MLP, CNNMnist, CNNCifar
 from models.Fed import FedAvg  # 注意：如果你在文件里重写了 FedAvg，这行可以注释掉
@@ -27,6 +28,7 @@ if __name__ == '__main__':
     # parse args
     args = args_parser()
     args.device = torch.device('cuda:{}'.format(args.gpu) if torch.cuda.is_available() and args.gpu != -1 else 'cpu')
+    set_seed(42)
 
     # load dataset and split users
     if args.dataset == 'mnist':
@@ -143,8 +145,12 @@ if __name__ == '__main__':
         # 2. 候选池节点进行本地训练
         for idx in candidate_idxs:
             local = LocalUpdate(args=args, dataset=dataset_train, idxs=dict_users[idx])
-            # 注意：传入的 net_glob 本身就是在 GPU 上的
-            w, loss = local.train(net=copy.deepcopy(net_glob).to(args.device))
+            
+            # 【核心修复】：必须同时传入 net 和 global_net
+            w, loss = local.train(
+                net=copy.deepcopy(net_glob).to(args.device),
+                global_net=copy.deepcopy(net_glob).to(args.device)
+            )
             
             # 计算当前节点的更新量，并强制转到 CPU 释放显存
             update_vec = get_weight_difference(w, w_glob).cpu()

@@ -29,19 +29,6 @@ class LocalUpdate(object):
         self.loss_func = nn.CrossEntropyLoss()
         self.selected_clients = []
         self.ldr_train = DataLoader(DatasetSplit(dataset, idxs), batch_size=self.args.local_bs, shuffle=True)
-        
-        # === [新增代码：计算本地数据分布 pi_y] ===
-        if self.args.use_logits:
-            self.pi_y = torch.zeros(args.num_classes)
-            for _, labels in self.ldr_train:
-                self.pi_y += torch.bincount(labels, minlength=args.num_classes).cpu()
-            
-            total_samples = self.pi_y.sum()
-            if total_samples > 0:
-                self.pi_y = self.pi_y / total_samples
-                
-            self.pi_y = self.pi_y.to(self.args.device)
-        # ==========================================
 
     def train(self, net, global_net):
         net.train()
@@ -60,20 +47,10 @@ class LocalUpdate(object):
                 # 1. 正常的前向传播
                 log_probs = net(images)
                 
-                # === [致命修复 2：补齐 Logit Adjustment 真实计算代码] ===
-                if self.args.use_logits:
-                    tau = 1.0
-                    epsilon = 1e-8
-                    # 计算惩罚项并减去
-                    adjustment = tau * torch.log(self.pi_y + epsilon)
-                    adjusted_logits = log_probs - adjustment
-                    loss = self.loss_func(adjusted_logits, labels)
-                else:
-                    # 不开 Logits 时，执行标准交叉熵
-                    loss = self.loss_func(log_probs, labels)
-                # ==========================================================
+                # 2. 执行标准交叉熵损失
+                loss = self.loss_func(log_probs, labels)
                 
-                # === [致命修复 1：统一变量名为 use_proximal] ===
+                # === [Proximal 约束项保留] ===
                 if self.args.use_proximal:
                     proximal_term = 0.0
                     # 遍历本地模型的每一个参数矩阵 w，和全局模型的对应矩阵 w_t

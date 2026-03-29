@@ -20,13 +20,14 @@ from models.Update import LocalUpdate
 from models.Nets import MLP, CNNMnist, CNNCifar
 from models.Fed import FedAvg
 from models.test import test_img
+from utils.seed import set_seed
 from utils.resource import ResourceManager
 from utils.sim_div import calculate_diversity, calculate_similarity_score
 
 if __name__ == '__main__':
     args = args_parser()
     args.device = torch.device('cuda:{}'.format(args.gpu) if torch.cuda.is_available() and args.gpu != -1 else 'cpu')
-
+    set_seed(42)
    # ================= [Load Dataset] =================
     if args.dataset == 'mnist':
         trans_mnist = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))])
@@ -101,16 +102,10 @@ if __name__ == '__main__':
     loss_train = []
     acc_test_history = [] 
 
-    if args.all_clients: 
-        print("Aggregation over all clients")
-        w_locals = [w_glob for i in range(args.num_users)]
-
     for iter in range(args.epochs):
         loss_locals = []
         len_locals = [] 
-        
-        if not args.all_clients:
-            w_locals = []
+        w_locals = []
             
         m = max(int(args.frac * args.num_users), 1)
 
