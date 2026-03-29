@@ -200,7 +200,10 @@ if __name__ == '__main__':
         for idx in selected_idxs:
             local = LocalUpdate(args=args, dataset=dataset_train, idxs=dict_users[idx])
             # 只有被选中的节点才真刀真枪地消耗算力和电量去 train
-            w, loss = local.train(net=copy.deepcopy(net_glob).to(args.device))
+            w, loss = local.train(
+                net=copy.deepcopy(net_glob).to(args.device),
+                global_net=net_glob
+            )
             
             # 训练完成后，计算最新的更新梯度
             update_vec = get_weight_difference(w, w_glob).cpu()

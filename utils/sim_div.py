@@ -1,18 +1,20 @@
 import numpy as np
 import torch
-import torch
 import torch.nn.functional as F
+
 # ===================================================================
-# 辅助函数：计算 KL 散度 (Diversity Metric)
+# 模块 1: 静态多样性计算 (Diversity Metric - 基于 KL 散度)
+# 用途: 用于在训练前评估各个客户端本地数据标签分布与全局均匀分布的差异
 # ===================================================================
 def calculate_diversity(dataset, dict_users, num_classes):
     diversity_scores = []
     P_uniform = np.ones(num_classes) / num_classes 
     
-    print("正在计算所有客户端的数据多样性 (Diversity)...")
+    print("=> 正在计算所有客户端的静态数据多样性 (KL Divergence)...")
     
     for idx in range(len(dict_users)):
         user_indices = dict_users[idx]
+        # 兼容不同版本 torchvision 的 targets 获取方式
         if hasattr(dataset, 'targets'):
             labels = np.array(dataset.targets)[list(user_indices)]
         else:
@@ -22,54 +24,49 @@ def calculate_diversity(dataset, dict_users, num_classes):
         for label in labels:
             label_counts[label] += 1
         
+        # 加上平滑项 epsilon=1e-5，防止除以 0 或 log(0)
         P_client = (label_counts + 1e-5) / (sum(label_counts) + 1e-5 * num_classes)
         kl_div = np.sum(P_uniform * np.log(P_uniform / P_client))
         diversity_scores.append(kl_div)
         
     return np.array(diversity_scores)
 
-# ===================================================================
-# 辅助函数：计算相似性 (Similarity Metric)
-# 只计算最后一层 (fc2) 的参数距离，防止距离过大导致分数归零
-# ===================================================================
-def calculate_similarity_score(w_global, w_local, k1=10, k2=0.01):
-    diff_sum = 0
-    target_layer = 'fc2' 
-    
-    layer_found = False
-    for k in w_global.keys():
-        if target_layer in k:
-            diff_sum += torch.sum(torch.abs(w_global[k] - w_local[k])).item()
-            layer_found = True
-            
-    if not layer_found:
-        total_diff = 0
-        total_params = 0
-        for k in w_global.keys():
-            total_diff += torch.sum(torch.abs(w_global[k] - w_local[k])).item()
-            total_params += w_global[k].numel()
-        diff_sum = total_diff
-    
-    rho = diff_sum
-    sim = k1 * np.exp(-k2 * rho)
-    return sim
 
+# ===================================================================
+# 模块 2: 动态相似度与散度计算 (SIM / DIV Metric - 基于梯度余弦方向)
+# 用途: 提取模型更新向量，并通过夹角余弦判断本地更新是否与全局收敛方向一致
+# ===================================================================
 def get_weight_difference(w_new, w_old):
-    """计算模型权重的差值（更新量），并强制在 CPU 上计算以避免设备冲突"""
+    """
+    计算模型权重的差值（即本轮的伪梯度/更新向量）
+    将其展平为一维向量，并强制在 CPU 上计算以避免爆显存
+    """
     diff = []
     for k in w_new.keys():
-        # 强制将新老权重都拉到 CPU 上，转为 float 后再相减
+        # 忽略批归一化层中的追踪批次统计（非学习参数）
+        if 'num_batches_tracked' in k:
+            continue
+        
+        # 强制将新老权重拉到 CPU，转为 float 后再相减，避免 GPU 显存堆积
         t_new = w_new[k].cpu().float()
         t_old = w_old[k].cpu().float()
         diff.append((t_new - t_old).view(-1).detach())
+        
     return torch.cat(diff)
 
 def compute_cosine_similarity(vec1, vec2):
-    """计算两个一维张量的余弦相似度，强制在 CPU 运算"""
-    # 强制拉到 CPU
+    """
+    计算两个一维张量的余弦相似度 (Cosine Similarity)
+    范围在 [-1, 1] 之间。
+    1 表示方向完全一致 (有益)，-1 表示方向完全相反 (有毒/漂移)
+    """
     vec1 = vec1.cpu()
     vec2 = vec2.cpu()
     
+    # 防止因为模型没有更新（零向量）导致分母为 0 出现 NaN
     if vec1.norm() == 0 or vec2.norm() == 0:
         return 0.0
-    return F.cosine_similarity(vec1.unsqueeze(0), vec2.unsqueeze(0)).item()
+        
+    # 余弦相似度计算
+    sim = F.cosine_similarity(vec1.unsqueeze(0), vec2.unsqueeze(0)).item()
+    return sim

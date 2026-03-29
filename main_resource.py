@@ -96,9 +96,10 @@ if __name__ == '__main__':
     net_glob.train()
     w_glob = net_glob.state_dict()
 
-   # ================= [战前准备：只保留资源管理器，删掉所有数据打分] =================
+  # ================= [战前准备：只保留资源管理器，删掉所有数据打分] =================
     w_glob = net_glob.state_dict()
-    resource_mgr = ResourceManager(args.num_users)
+    # 【修复 1】：必须传入 dict_users 和 local_ep 才能初始化新的物理能耗模型
+    resource_mgr = ResourceManager(args.num_users, dict_users, local_ep=args.local_ep)
     loss_train = []
     acc_test_history = [] 
 
@@ -120,8 +121,9 @@ if __name__ == '__main__':
         current_max_time = 0.0
         
         for client_id in all_clients:
-            data_len = len(dict_users[client_id])
-            t, e = resource_mgr.calculate_cost(client_id, data_len)
+            # 【修复 2】：直接从全新的物理管理器中读取预计算好的静态开销
+            t = resource_mgr.time_costs[client_id]
+            e = resource_mgr.energy_costs[client_id]
             
             potential_energy = current_energy_sum + e
             potential_time = max(current_max_time, t)
@@ -139,32 +141,39 @@ if __name__ == '__main__':
         # 3. 学术兜底机制
         if len(selected_users) == 0:
             print("⚠️ 警告：本轮系统资源约束过于严苛，触发兜底！强行选择 1 个最高效节点。")
-            times = [resource_mgr.calculate_cost(i, len(dict_users[i]))[0] for i in range(args.num_users)]
+            times = resource_mgr.time_costs
             fastest_client = np.argmin(times)
             selected_users = [fastest_client]
-            current_max_time, current_energy_sum = resource_mgr.calculate_cost(fastest_client, len(dict_users[fastest_client]))
+            current_max_time = resource_mgr.time_costs[fastest_client]
+            current_energy_sum = resource_mgr.energy_costs[fastest_client]
             
-        resource_mgr.update_selection(selected_users)
-        
         print(f"Round {iter} | 随机约束装箱 | 选中 {len(selected_users)} 人 | 时延: {current_max_time:.2f}s | 耗能: {current_energy_sum:.2f}J")
         # ========================================================================================
 
         # 【核心修正】：纯粹的本地训练，没有任何 Sim 更新！
         for idx in selected_users:
             local = LocalUpdate(args=args, dataset=dataset_train, idxs=dict_users[idx])
-            w, loss = local.train(net=copy.deepcopy(net_glob).to(args.device))
             
-            if args.all_clients:
-                w_locals[idx] = copy.deepcopy(w)
-            else:
-                w_locals.append(copy.deepcopy(w))
-            loss_locals.append(copy.deepcopy(loss))
+            # 【修复 3】：补充 global_net 防止冗余运算
+            w, loss = local.train(
+                net=copy.deepcopy(net_glob).to(args.device),
+                global_net=net_glob
+            )
+            
+            # 【致命修复 4】：彻底铲除深拷贝！防止显存爆炸
+            w_locals.append({k: v.cpu() for k, v in w.items()})
+            loss_locals.append(loss)
             
             len_locals.append(len(dict_users[idx]))
+            
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             
         # 将权重传递给加权聚合函数
         w_glob = FedAvg(w_locals, len_locals)
         net_glob.load_state_dict(w_glob)
+
+        # ... (后续评估与保存逻辑保持不变) ...
 
 
         loss_avg = sum(loss_locals) / len(loss_locals)

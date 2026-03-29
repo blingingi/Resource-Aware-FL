@@ -155,7 +155,10 @@ if __name__ == '__main__':
         
         for idx in selected_idxs:
             local = LocalUpdate(args=args, dataset=dataset_train, idxs=dict_users[idx])
-            w, loss = local.train(net=copy.deepcopy(net_glob).to(args.device))
+            w, loss = local.train(
+                net=copy.deepcopy(net_glob).to(args.device),
+                global_net=net_glob
+            )
             
             w_locals.append({k: v.cpu() for k, v in w.items()})
             loss_locals.append(loss)
