@@ -123,14 +123,27 @@ if __name__ == '__main__':
     alpha = 0.8  # SIM的权重
     beta = 0.2   # DIV的权重
 
+   # === [新增配置] 动态 V 的参数 (可以放到 parser 里) ===
+    V_max = 5.0  # 初始的 V
+    
+    # 记录每个节点有多少轮没被选中了 (Staleness/陈旧性)
+    if 'unselected_counts' not in locals():
+        unselected_counts = {i: 0 for i in range(args.num_users)}
+
     for iter in range(args.epochs):
+        
+        # 1. 动态衰减 V (采用余弦退火策略)
+        import math
+        V_t = 0.5 * V_max * (1 + math.cos(math.pi * iter / args.epochs))
+        # 如果你希望后期完全退化为公平调度，可以用线性衰减：
+        # V_t = V_max * max(0.0, 1.0 - (iter / args.epochs))
         
         m = max(int(args.frac * args.num_users), 1)
         pool_size = min(m * 2, args.num_users) 
         
         candidate_idxs = np.random.choice(range(args.num_users), pool_size, replace=False)
 
-        print(f"\n--- Round {iter} ---")
+        print(f"\n--- Round {iter} (V_t: {V_t:.3f}) ---")
         
         selected_idxs = []
         
@@ -140,7 +153,13 @@ if __name__ == '__main__':
             sim_scores = {}
             for idx in candidate_idxs:
                 sim = compute_cosine_similarity(historical_updates[idx], global_update_dir)
-                sim_scores[idx] = sim if not torch.isnan(torch.tensor(sim)) else 0.0
+                sim = sim if not torch.isnan(torch.tensor(sim)) else 0.0
+                
+                # [核心策略] 历史效用的陈旧性衰减 (Staleness Discount)
+                # 越久没被选，其缓存的效用参考价值越低，强制其效用向 0 靠拢（不惩罚也不奖励）
+                tau = unselected_counts[idx]
+                discount_factor = 1.0 / math.sqrt(tau + 1.0)
+                sim_scores[idx] = sim * discount_factor
             
             remaining_candidates = list(candidate_idxs)
             
@@ -163,13 +182,16 @@ if __name__ == '__main__':
                         
                         div_penalty = div_penalty / len(selected_idxs)
                     
-                    utility = utility - beta * div_penalty
+                    # 同样对 div_penalty 进行陈旧性打折
+                    tau = unselected_counts[idx]
+                    discount_factor = 1.0 / math.sqrt(tau + 1.0)
+                    utility = utility - beta * (div_penalty * discount_factor)
                     
                     # (2) 获取真实的底层资源惩罚项
                     resource_penalty = resource_mgr.get_penalty(idx)
                     
-                    # (3) [核心修正] Lya 得分计算：加入 gamma * selection_counts[idx] 的公平性惩罚
-                    final_score = V * utility - resource_penalty - gamma * selection_counts[idx]
+                    # (3) Lya 得分计算：使用动态 V_t，并保留公平性惩罚
+                    final_score = V_t * utility - resource_penalty - gamma * selection_counts[idx]
                     
                     if final_score > best_score:
                         best_score = final_score
@@ -178,9 +200,13 @@ if __name__ == '__main__':
                 selected_idxs.append(best_idx)
                 remaining_candidates.remove(best_idx)
         
-        # === [核心修正] 选人结束后，更新被选节点的计数值 ===
-        for idx in selected_idxs:
-            selection_counts[idx] += 1
+        # === [核心修正] 选人结束后，更新计数器 ===
+        for idx in range(args.num_users):
+            if idx in selected_idxs:
+                selection_counts[idx] += 1
+                unselected_counts[idx] = 0  # 重置未被选中轮数
+            else:
+                unselected_counts[idx] += 1 # 累加陈旧性轮数
                 
         print(f"Selected clients: {selected_idxs}")
         

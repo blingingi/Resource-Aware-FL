@@ -1,6 +1,4 @@
-
-
-    #!/usr/bin/env python
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # Python version: 3.6
 
@@ -26,7 +24,6 @@ from models.test import test_img
 # 导入你的资源管理器
 from utils.resource import ResourceManager
 from utils.seed import set_seed
-
 
 if __name__ == '__main__':
     # parse args
@@ -101,9 +98,18 @@ if __name__ == '__main__':
     # === 初始化资源管理器 ===
     resource_mgr = ResourceManager(args.num_users, dict_users, local_ep=args.local_ep, limit_ratio=0.8)
     
-    # === [核心修正] 初始化被选次数记录器，强制探索 ===
-    selection_counts = {i: 0 for i in range(args.num_users)}
-    gamma = 2.0  # 频率惩罚系数
+    # ==========================================================
+    # [李雅普诺夫核心修正] 初始化公平性虚拟队列
+    # ==========================================================
+    # 计算期望的每轮选择人数
+    m_expected = max(int(args.frac * args.num_users), 1)
+    
+    # rho: 长期公平性阈值 (最低参与率)
+    # 理想情况下每个节点的被选概率是 m / N。为了容错，我们要求它至少达到理想状态的 80%
+    rho = (m_expected / float(args.num_users)) * 0.8 
+    
+    # Z_queues: 虚拟队列。值越大，代表系统越“亏欠”这个节点，越需要优先补偿它。
+    Z_queues = {i: 0.0 for i in range(args.num_users)}
 
     for iter in range(args.epochs):
         
@@ -115,7 +121,7 @@ if __name__ == '__main__':
         print(f"\n--- Round {iter} ---")
         
         # ==========================================================
-        # 纯 Lya 挑选阶段 (只看资源和公平性，不看梯度效用)
+        # 纯 Lya 挑选阶段 (只看资源和严格的公平性，没有效用)
         # ==========================================================
         selected_idxs = []
         remaining_candidates = list(candidate_idxs)
@@ -128,8 +134,11 @@ if __name__ == '__main__':
                 # 获取真实的底层资源惩罚项
                 resource_penalty = resource_mgr.get_penalty(idx)
                 
-                # [纯Lya得分公式]: 没有任何 Utility 收益，全看惩罚项小不小
-                final_score = - resource_penalty - gamma * selection_counts[idx]
+                # [纯Lya得分公式]
+                # 目标：最小化资源开销，同时偿还“公平性债务”
+                # Z_queues 相当于一个强制的加分红利：如果一个节点很久没被选，Z 会非常大，
+                # 它将直接抵消资源惩罚，强迫系统选中它，从而打破死锁。
+                final_score = - resource_penalty + Z_queues[idx]
                 
                 if final_score > best_score:
                     best_score = final_score
@@ -138,11 +147,18 @@ if __name__ == '__main__':
             selected_idxs.append(best_idx)
             remaining_candidates.remove(best_idx)
         
-        # 选人结束后，更新被选节点的计数值
-        for idx in selected_idxs:
-            selection_counts[idx] += 1
-                
         print(f"Selected clients: {selected_idxs}")
+        
+        # ==========================================================
+        # [李雅普诺夫核心修正] 严格更新虚拟队列
+        # ==========================================================
+        for idx in range(args.num_users):
+            # 服务率：被选中则提供 1.0 的服务，未选中则为 0.0
+            x_i = 1.0 if idx in selected_idxs else 0.0
+            # 队列更新公式：Z(t+1) = max(0, Z(t) - x_i + rho)
+            # 没被选中的人，Z 增加 rho (越来越渴望被选)
+            # 被选中的人，Z 减少 (1.0 - rho) (债务偿还，渴望降低)
+            Z_queues[idx] = max(0.0, Z_queues[idx] - x_i + rho)
         
         # ==========================================================
         # 结算阶段与消耗阶段
