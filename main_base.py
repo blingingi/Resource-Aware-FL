@@ -1,6 +1,9 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # Python version: 3.6
+#无任何优化策略，作为性能基准
+#不考虑资源消耗、数据质量、公平性
+#实现最简单，但收敛慢且可能违反资源预算
 
 import matplotlib
 matplotlib.use('Agg')

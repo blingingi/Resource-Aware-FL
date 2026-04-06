@@ -1,7 +1,8 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # Python version: 3.6
-
+#通过梯度方向信息最大化每轮训练的"信息增益"
+#阶段 1：候选池预训练  阶段 2：贪心选择
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt

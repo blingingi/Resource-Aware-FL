@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # Python version: 3.6
-
+#设计理念：在严格的物理红线内做随机选择
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt

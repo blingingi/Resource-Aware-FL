@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # Python version: 3.6
-
+#设计理念：将长期资源约束转化为单轮贪心决策
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
