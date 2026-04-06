@@ -12,75 +12,62 @@ import os
 from torchvision import datasets, transforms
 from torch import nn
 
+
 # 引入项目依赖
-from utils.sampling import mnist_iid, mnist_noniid, mnist_dirichlet,cifar_iid, cifar_noniid, cifar_dirichlet
+from utils.sampling import mnist_iid, mnist_noniid, mnist_dirichlet, cifar_iid, cifar_noniid, cifar_dirichlet
 from utils.options import args_parser
 from models.Update import LocalUpdate
-# 确保 Nets 里的 CNNCifar 已经是你修改过的 3层宽体版本
 from models.Nets import MLP, CNNMnist, CNNCifar
 from models.Fed import FedAvg
 from models.test import test_img
 from utils.seed import set_seed
 from utils.resource import ResourceManager
-from utils.sim_div import calculate_diversity, calculate_similarity_score
+# 【修复1】：剔除了过期且未使用的 sim_div 导入
 
 if __name__ == '__main__':
     args = args_parser()
     args.device = torch.device('cuda:{}'.format(args.gpu) if torch.cuda.is_available() and args.gpu != -1 else 'cpu')
     set_seed(42)
-   # ================= [Load Dataset] =================
+
+    # ================= [Load Dataset] =================
     if args.dataset == 'mnist':
         trans_mnist = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))])
         dataset_train = datasets.MNIST('../data/mnist/', train=True, download=True, transform=trans_mnist)
         dataset_test = datasets.MNIST('../data/mnist/', train=False, download=True, transform=trans_mnist)
         
-        # 兼容不同的划分方式
         if args.partition == 'iid':
             dict_users = mnist_iid(dataset_train, args.num_users)
         elif args.partition == 'shard':
             dict_users = mnist_noniid(dataset_train, args.num_users)
         elif args.partition == 'dirichlet':
-            # 如果你的 sampling.py 里有 mnist_dirichlet 就用它，没有的话直接用 cifar_dirichlet 处理 MNIST 标签也是一样的
             try:
                 from utils.sampling import mnist_dirichlet
                 dict_users = mnist_dirichlet(dataset_train, args.num_users, args.alpha)
             except ImportError:
-                dict_users = cifar_dirichlet(dataset_train, args.num_users, args.alpha,args.local_bs)
+                dict_users = cifar_dirichlet(dataset_train, args.num_users, args.alpha, args.local_bs)
         else:
             exit('Error: unrecognized partition strategy for MNIST')
             
     elif args.dataset == 'cifar':
         trans_train = transforms.Compose([
-        transforms.RandomCrop(32, padding=4),     # 随机裁剪（标准CIFAR增强）
-        transforms.RandomHorizontalFlip(),        # 随机水平翻转
-        transforms.ToTensor(),
-        transforms.Normalize((0.5, 0.5, 0.5), 
-                             (0.5, 0.5, 0.5))
+            transforms.RandomCrop(32, padding=4),     
+            transforms.RandomHorizontalFlip(),        
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
         ])
         trans_test = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.5, 0.5, 0.5), 
-                             (0.5, 0.5, 0.5))
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
         ])
-        dataset_train = datasets.CIFAR10(
-        '../data/cifar', 
-        train=True, 
-        download=True, 
-        transform=trans_train
-        )
-        dataset_test = datasets.CIFAR10(
-        '../data/cifar', 
-        train=False, 
-        download=True, 
-        transform=trans_test
-        )
+        dataset_train = datasets.CIFAR10('../data/cifar', train=True, download=True, transform=trans_train)
+        dataset_test = datasets.CIFAR10('../data/cifar', train=False, download=True, transform=trans_test)
         
         if args.partition == 'iid':
             dict_users = cifar_iid(dataset_train, args.num_users)
         elif args.partition == 'shard':
             dict_users = cifar_noniid(dataset_train, args.num_users)
         elif args.partition == 'dirichlet':
-            dict_users = cifar_dirichlet(dataset_train, args.num_users, args.alpha,args.local_bs)
+            dict_users = cifar_dirichlet(dataset_train, args.num_users, args.alpha, args.local_bs)
         else:
             exit('Error: unrecognized partition strategy for CIFAR')
     else:
@@ -91,15 +78,27 @@ if __name__ == '__main__':
         net_glob = CNNMnist(args=args).to(args.device)
     elif args.dataset == 'cifar':
         net_glob = CNNCifar(args=args).to(args.device)
+    elif args.model == 'mlp':
+        img_size = dataset_train[0][0].shape
+        len_in = 1
+        for x in img_size:
+            len_in *= x
+        net_glob = MLP(dim_in=len_in, dim_hidden=200, dim_out=args.num_classes).to(args.device)
     
     print(net_glob)
     net_glob.train()
     w_glob = net_glob.state_dict()
 
-  # ================= [战前准备：只保留资源管理器，删掉所有数据打分] =================
+    # ================= [只保留资源管理器，删掉所有数据打分] =================
     w_glob = net_glob.state_dict()
-    # 【修复 1】：必须传入 dict_users 和 local_ep 才能初始化新的物理能耗模型
+    # 必须传入 dict_users 和 local_ep 才能初始化新的物理能耗模型
     resource_mgr = ResourceManager(args.num_users, dict_users, local_ep=args.local_ep)
+    
+    # 【修复2】：动态提取公平的系统红线 (单轮系统最大容忍耗时，和 m个节点的总耗能预算)
+    m_target = max(int(args.frac * args.num_users), 1)
+    SYS_MAX_TIME = resource_mgr.T_limit * 1.5   # 允许单轮最大时延(可适当放宽防止过于苛刻)
+    SYS_MAX_ENERGY = resource_mgr.E_limit * m_target # 本轮总电量预算
+    
     loss_train = []
     acc_test_history = [] 
 
@@ -111,30 +110,26 @@ if __name__ == '__main__':
         m = max(int(args.frac * args.num_users), 1)
 
         # ================= [Selection Strategy (Random + Resource Constraints)] =================
-        # 1. 纯随机打乱所有客户端
         all_clients = list(range(args.num_users))
         np.random.shuffle(all_clients)
         
-        # 2. 资源约束下的随机装箱 (Random Knapsack Selection)
         selected_users = []
         current_energy_sum = 0.0
         current_max_time = 0.0
         
         for client_id in all_clients:
-            # 【修复 2】：直接从全新的物理管理器中读取预计算好的静态开销
             t = resource_mgr.time_costs[client_id]
             e = resource_mgr.energy_costs[client_id]
             
             potential_energy = current_energy_sum + e
             potential_time = max(current_max_time, t)
             
-            # 严格检查红线：只要不超时、不超电，并且是随机碰上的，就直接拉入队伍
-            if potential_energy <= args.max_energy and potential_time <= args.max_time:
+            # 严格检查客观物理红线
+            if potential_energy <= SYS_MAX_ENERGY and potential_time <= SYS_MAX_TIME:
                 selected_users.append(client_id)
                 current_energy_sum = potential_energy
                 current_max_time = potential_time
                 
-            # 招满 m 个人即可停止
             if len(selected_users) >= m:
                 break
                 
@@ -150,31 +145,23 @@ if __name__ == '__main__':
         print(f"Round {iter} | 随机约束装箱 | 选中 {len(selected_users)} 人 | 时延: {current_max_time:.2f}s | 耗能: {current_energy_sum:.2f}J")
         # ========================================================================================
 
-        # 【核心修正】：纯粹的本地训练，没有任何 Sim 更新！
         for idx in selected_users:
             local = LocalUpdate(args=args, dataset=dataset_train, idxs=dict_users[idx])
             
-            # 【修复 3】：补充 global_net 防止冗余运算
             w, loss = local.train(
                 net=copy.deepcopy(net_glob).to(args.device),
                 global_net=net_glob
             )
             
-            # 【致命修复 4】：彻底铲除深拷贝！防止显存爆炸
             w_locals.append({k: v.cpu() for k, v in w.items()})
             loss_locals.append(loss)
-            
             len_locals.append(len(dict_users[idx]))
             
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             
-        # 将权重传递给加权聚合函数
         w_glob = FedAvg(w_locals, len_locals)
         net_glob.load_state_dict(w_glob)
-
-        # ... (后续评估与保存逻辑保持不变) ...
-
 
         loss_avg = sum(loss_locals) / len(loss_locals)
         loss_train.append(loss_avg)
@@ -187,30 +174,24 @@ if __name__ == '__main__':
         net_glob.train()
         args.lr = args.lr * 0.99
 
-
     # ================= [绘图与保存结果] =================
     import datetime
-
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     script_name = os.path.basename(__file__).split('.')[0]
     
-    file_id = 'fed_{}_{}_{}_alpha{}_ep{}_time{}_energy{}_{}'.format(
+    file_id = 'fed_{}_{}_{}_alpha{}_ep{}_{}'.format(
         script_name, 
         args.dataset, 
         args.partition, 
         args.alpha, 
         args.epochs, 
-        args.max_time,   # 记录时间红线
-        args.max_energy, # 记录能耗红线
         timestamp
     )
 
-    # 【修复5】增加防崩溃目录检查
     save_dir = './save'
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
 
     save_path = os.path.join(save_dir, '{}_acc.npy'.format(file_id))
     np.save(save_path, acc_test_history)
-    
     print(f"🎉 实验结束！数据已绝对安全地保存到: {save_path}")

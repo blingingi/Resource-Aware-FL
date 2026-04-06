@@ -99,7 +99,7 @@ if __name__ == '__main__':
     acc_test_history = [] 
 
     # === 初始化资源管理器 ===
-    resource_mgr = ResourceManager(args.num_users, dict_users, limit_ratio=0.8)
+    resource_mgr = ResourceManager(args.num_users, dict_users, local_ep=args.local_ep, limit_ratio=0.8)
     
     # === [核心修正] 初始化被选次数记录器，强制探索 ===
     selection_counts = {i: 0 for i in range(args.num_users)}

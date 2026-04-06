@@ -107,7 +107,7 @@ if __name__ == '__main__':
     
     # 权衡参数 V：越大越看重模型准确率 (SIM/DIV)，越小越看重资源限制。
     # 建议值：5.0~50.0 视具体分数数量级而定
-    V = 5.0  
+    V = 5 
 
     # === 初始化全局更新方向参考 ===
     flat_w_glob = get_weight_difference(w_glob, w_glob) 
