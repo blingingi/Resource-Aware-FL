@@ -49,9 +49,8 @@ if __name__ == '__main__':
             exit('Error: unrecognized partition strategy for MNIST.')
             
     elif args.dataset == 'cifar':
+        # 移除 RandomCrop 和 RandomHorizontalFlip，仅保留基础预处理
         trans_train = transforms.Compose([
-            transforms.RandomCrop(32, padding=4),
-            transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
             transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
         ])

@@ -47,9 +47,8 @@ if __name__ == '__main__':
             exit('Error: unrecognized partition strategy')
             
     elif args.dataset == 'cifar':
+        # 移除 RandomCrop 和 RandomHorizontalFlip，仅保留基础预处理
         trans_train = transforms.Compose([
-            transforms.RandomCrop(32, padding=4),
-            transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
             transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
         ])
@@ -233,7 +232,7 @@ if __name__ == '__main__':
 
     # ================= [绘图与保存结果] =================
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    script_name = "ours_final"
+    script_name = "ours"
     
     file_id = 'fed_{}_{}_{}_alpha{}_ep{}_{}'.format(
         script_name, args.dataset, args.partition, args.alpha, args.epochs, timestamp)

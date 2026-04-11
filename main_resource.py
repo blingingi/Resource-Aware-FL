@@ -49,9 +49,8 @@ if __name__ == '__main__':
             exit('Error: unrecognized partition strategy for MNIST')
             
     elif args.dataset == 'cifar':
+        # 移除 RandomCrop 和 RandomHorizontalFlip，仅保留基础预处理
         trans_train = transforms.Compose([
-            transforms.RandomCrop(32, padding=4),     
-            transforms.RandomHorizontalFlip(),        
             transforms.ToTensor(),
             transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
         ])
@@ -61,7 +60,6 @@ if __name__ == '__main__':
         ])
         dataset_train = datasets.CIFAR10('../data/cifar', train=True, download=True, transform=trans_train)
         dataset_test = datasets.CIFAR10('../data/cifar', train=False, download=True, transform=trans_test)
-        
         if args.partition == 'iid':
             dict_users = cifar_iid(dataset_train, args.num_users)
         elif args.partition == 'shard':
