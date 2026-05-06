@@ -22,14 +22,28 @@ class DatasetSplit(Dataset):
         image, label = self.dataset[self.idxs[item]]
         return image, label
 
-
 class LocalUpdate(object):
-    def __init__(self, args, dataset=None, idxs=None):
+    # 【修改】：在参数列表里增加一个 adaptive_ratio (即 w_k)
+    def __init__(self, args, dataset=None, idxs=None, adaptive_ratio=1.0):
         self.args = args
         self.loss_func = nn.CrossEntropyLoss()
         self.selected_clients = []
-        self.ldr_train = DataLoader(DatasetSplit(dataset, idxs), batch_size=self.args.local_bs, shuffle=True)
-
+        
+        # 核心逻辑：计算这轮该用多少真实的图片！
+        # 确保哪怕比例再小，也至少用 1 个样本，否则代码会崩
+        min_samples_required = max(10, self.args.local_bs) 
+        actual_num_samples = max(min_samples_required, int(len(idxs) * adaptive_ratio))
+        
+        # 截断数据！这就是自适应 Batch Size 的物理落地！
+        adaptive_idxs = list(idxs)[:actual_num_samples]
+        
+        self.ldr_train = DataLoader(
+            DatasetSplit(dataset, adaptive_idxs), 
+            batch_size=self.args.local_bs, 
+            shuffle=True
+        )
+        
+    # ... 下面的 train 函数保持你原来的逻辑不变即可 ...
     def train(self, net, global_net):
         net.train()
         # 将 global_net 的参数固化，切断它的梯度图，防止内存爆炸
